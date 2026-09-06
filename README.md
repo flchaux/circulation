@@ -4,6 +4,8 @@ Application web pour étudier les conséquences d'un changement de signalisation
 plans de feux, stops, sens uniques, zones 30, giratoires, fermetures de voies.
 Tout s'exécute dans le navigateur, sans serveur.
 
+Code source : <https://github.com/flchaux/circulation>
+
 ## Démarrer
 
 ```bash
