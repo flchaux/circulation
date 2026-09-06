@@ -1,0 +1,38 @@
+{
+  "name": "circulation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulation graphique de circulation routière pour étudier les changements de signalisation d'une commune française",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "extract-city": "node scripts/extract-city.mjs",
+    "e2e": "playwright test",
+    "deploy": "bash scripts/deploy.sh"
+  },
+  "dependencies": {
+    "idb-keyval": "^6.3.0",
+    "immer": "^11.1.18",
+    "leaflet": "^1.9.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/leaflet": "^1.9.22",
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "fake-indexeddb": "^6.2.5",
+    "playwright": "^1.62.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
+  }
+}

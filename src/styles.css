@@ -1,0 +1,1405 @@
+/*
+ * Feuille de style unique de l'application (thème clair sobre, police système, interface dense).
+ *
+ * Organisation :
+ *   1. Variables et remise à zéro          6. Tableaux
+ *   2. Coquille (barre supérieure, onglets) 7. Panneau Résultats / Comparer
+ *   3. Contrôles de formulaire              8. Feux (schéma, cycle)
+ *   4. Blocs de panneau                     9. Graphiques et fenêtres modales
+ *   5. Listes et statistiques              10. Carte (Leaflet + calques canvas)
+ */
+
+/* ------------------------------------------------------------------ */
+/*  1. Variables et remise à zéro                                      */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --fond: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #eef1f6;
+  --bordure: #d5dbe4;
+  --bordure-forte: #b4bdcb;
+  --texte: #1b2430;
+  --texte-doux: #5c6a7a;
+  --accent: #0b63ce;
+  --accent-doux: #e5eefb;
+  --danger: #c02f2f;
+  --danger-doux: #fdecec;
+  --succes: #12805c;
+  --avertissement: #9a5b06;
+  --vert-feu: #2f9e6b;
+  --orange-feu: #dfa215;
+  --rouge-feu: #c02f2f;
+  --rayon: 4px;
+  --ombre: 0 1px 2px rgba(16, 24, 40, 0.09);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--fond);
+  color: var(--texte);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+}
+
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+h2 { font-size: 14px; }
+h3 { font-size: 13px; }
+h4 { font-size: 12px; color: var(--texte-doux); }
+
+p { margin: 0; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------------ */
+/*  2. Coquille : barre supérieure, espace de travail, onglets         */
+/* ------------------------------------------------------------------ */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--bordure);
+  box-shadow: var(--ombre);
+  z-index: 2;
+}
+
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topbar-group.simulation {
+  margin-left: auto;
+}
+
+.app-title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  margin-right: 2px;
+}
+
+.project-name {
+  width: 190px;
+}
+
+/* Pastille « modifications non enregistrées » sur le bouton d'enregistrement. */
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--avertissement);
+  vertical-align: middle;
+}
+
+.clock {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.clock-time {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.clock-total {
+  color: var(--texte-doux);
+}
+
+.progress-bar {
+  position: relative;
+  width: 130px;
+  height: 8px;
+  border: 1px solid var(--bordure);
+  border-radius: 99px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.progress-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+}
+
+/* Part de chauffe : elle est simulée mais exclue des statistiques. */
+.progress-warmup {
+  background: repeating-linear-gradient(135deg, #dfe5ee 0 4px, #eef1f6 4px 8px);
+}
+
+.progress-fill {
+  background: var(--accent);
+  opacity: 0.85;
+}
+
+.counters {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+}
+
+.counters div {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.counters dt {
+  font-size: 10px;
+  color: var(--texte-doux);
+  white-space: nowrap;
+}
+
+.counters dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.hint.stale {
+  color: var(--avertissement);
+  max-width: 220px;
+}
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid transparent;
+  font-size: 12px;
+}
+
+.banner.error {
+  background: var(--danger-doux);
+  border-bottom-color: #f0c4c4;
+  color: #7d1c1c;
+}
+
+.banner.busy {
+  background: var(--accent-doux);
+  border-bottom-color: #c8dcf6;
+  color: #0b3f80;
+}
+
+.banner-message {
+  flex: 1;
+  white-space: pre-line;
+}
+
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  flex: 0 0 380px;
+  width: 380px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--bordure);
+}
+
+.tabs {
+  display: flex;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--bordure);
+}
+
+.tabs button {
+  flex: 1;
+  padding: 7px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--texte-doux);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tabs button:hover {
+  background: var(--accent-doux);
+}
+
+.tabs button.active {
+  background: var(--surface);
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ------------------------------------------------------------------ */
+/*  3. Contrôles de formulaire                                         */
+/* ------------------------------------------------------------------ */
+
+input[type='text'],
+input[type='search'],
+input[type='number'],
+select {
+  font: inherit;
+  color: inherit;
+  padding: 3px 6px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: #fff;
+  min-width: 0;
+}
+
+select {
+  padding: 3px 4px;
+}
+
+input:disabled,
+select:disabled {
+  background: var(--surface-2);
+  color: var(--texte-doux);
+}
+
+input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.button {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--bordure-forte);
+  border-radius: var(--rayon);
+  background: linear-gradient(#fff, #f2f5f9);
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--accent-doux);
+  border-color: var(--accent);
+}
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.button.primary:hover:not(:disabled) {
+  background: #0a58b6;
+  color: #fff;
+}
+
+.button.danger {
+  color: var(--danger);
+  border-color: #e2b6b6;
+  background: #fff;
+}
+
+.button.danger:hover:not(:disabled) {
+  background: var(--danger-doux);
+  border-color: var(--danger);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--rayon);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--bordure);
+}
+
+.icon-button.danger {
+  color: var(--danger);
+}
+
+.icon-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.field.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+}
+
+.field-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--texte-doux);
+}
+
+.field-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: #fff;
+}
+
+.field-input input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 0;
+  background: transparent;
+}
+
+.field-input input:focus {
+  outline: none;
+}
+
+.field-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-doux);
+}
+
+.field-input.invalid {
+  border-color: var(--danger);
+  background: var(--danger-doux);
+}
+
+.field-unit {
+  font-size: 11px;
+  color: var(--texte-doux);
+  white-space: nowrap;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+}
+
+.fieldset legend {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--texte-doux);
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--bordure-forte);
+  border-radius: var(--rayon);
+  overflow: hidden;
+}
+
+.segmented button {
+  flex: 1;
+  padding: 4px 8px;
+  border: 0;
+  border-right: 1px solid var(--bordure);
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button:hover:not(:disabled) {
+  background: var(--accent-doux);
+}
+
+.segmented button.active,
+.segmented button.active:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+
+.segmented button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.badge {
+  padding: 1px 5px;
+  border: 1px solid var(--bordure);
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--texte-doux);
+  font-size: 10px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/*  4. Blocs de panneau                                                */
+/* ------------------------------------------------------------------ */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bordure);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.row > .field {
+  flex: 1 1 90px;
+}
+
+.row > .button {
+  flex: 0 0 auto;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--texte-doux);
+}
+
+.hint.error,
+.error {
+  color: var(--danger);
+}
+
+.muted {
+  color: var(--texte-doux);
+}
+
+.warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--avertissement);
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--texte-doux);
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--bordure);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rotation 0.8s linear infinite;
+}
+
+@keyframes rotation {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 3s; }
+}
+
+.report {
+  padding: 6px 8px;
+  border-radius: var(--rayon);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.report ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
+.advanced {
+  padding-top: 6px;
+  border-top: 1px dashed var(--bordure);
+}
+
+.advanced summary {
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.advanced > *:not(summary) {
+  margin-top: 8px;
+}
+
+/* ------------------------------------------------------------------ */
+/*  5. Listes et statistiques                                          */
+/* ------------------------------------------------------------------ */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Sans cette contrainte, une ligne au libellé long déborde de la barre latérale. */
+  min-width: 0;
+  min-width: 0;
+}
+
+.list-row {
+  display: flex;
+  flex: 1;
+  /* Un <button> se dimensionne sur son contenu même en flex : sans cette largeur il déborde de la barre latérale. */
+  width: 100%;
+  box-sizing: border-box;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--rayon);
+  background: var(--surface-2);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.list-row:hover:not(:disabled) {
+  background: var(--accent-doux);
+}
+
+.list-row.active {
+  border-color: var(--accent);
+  background: var(--accent-doux);
+}
+
+.list-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.list-main {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.list-side {
+  color: var(--texte-doux);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Ligne de liste non cliquable (journal des modifications). */
+.list-item > .list-main {
+  padding: 3px 0;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.stats dt {
+  color: var(--texte-doux);
+}
+
+.stats dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/*  6. Tableaux                                                        */
+/* ------------------------------------------------------------------ */
+
+.table-wrap {
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: #fff;
+  overflow-x: auto;
+}
+
+.table-wrap.scroll {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--bordure);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0;
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.data-table thead th button {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.data-table thead th.right button {
+  justify-content: flex-end;
+}
+
+.data-table th.right,
+.data-table td.right {
+  text-align: right;
+}
+
+.data-table tbody th,
+.data-table tbody td {
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table tbody th[scope='row'] {
+  font-weight: 500;
+}
+
+/*
+ * Barre latérale de 380 px : seuls les intitulés (première colonne) passent à la ligne, les valeurs
+ * numériques restent d'un seul tenant. Sans cela, les colonnes utiles sortent du cadre visible.
+ */
+.data-table th[scope='row'],
+.data-table tbody td:first-child {
+  white-space: normal;
+  min-width: 96px;
+}
+
+.data-table tbody tr:hover {
+  background: var(--accent-doux);
+}
+
+.data-table tbody tr.selected {
+  background: #dbe9fa;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.data-table tbody tr:last-child th,
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.sort-mark {
+  font-size: 9px;
+  color: var(--texte-doux);
+}
+
+.table-note {
+  padding: 3px 6px;
+  font-size: 11px;
+  color: var(--texte-doux);
+}
+
+/* Matrices (interdictions de tourner, origine-destination) : première colonne figée. */
+.data-table.matrix td {
+  text-align: center;
+}
+
+.data-table.matrix tbody th[scope='row'] {
+  position: sticky;
+  left: 0;
+  background: #fff;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-number {
+  width: 64px;
+  padding: 1px 4px;
+  border: 1px solid var(--bordure);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------------ */
+/*  7. Panneaux Résultats et Comparer                                  */
+/* ------------------------------------------------------------------ */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: var(--surface-2);
+}
+
+.tile-value {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--texte-doux);
+}
+
+.tile-label {
+  font-size: 11px;
+  color: var(--texte-doux);
+}
+
+/* Synthèse de la comparaison : l'intitulé peut passer à la ligne pour que la colonne « Écart » reste visible. */
+.data-table.comparaison {
+  table-layout: fixed;
+}
+
+/* En disposition fixe, les largeurs sont celles de la première ligne : elles se règlent sur l'en-tête. */
+.data-table.comparaison thead th {
+  white-space: normal;
+}
+
+.data-table.comparaison thead th:first-child {
+  width: 38%;
+}
+
+.data-table.comparaison th[scope='row'] {
+  white-space: normal;
+}
+
+/*
+ * Écarts : la hausse d'un indicateur n'est ni bonne ni mauvaise en soi (plus de véhicules sortis est
+ * favorable, plus de retard ne l'est pas). L'écart est donc mis en évidence sans couleur de jugement.
+ */
+.data-table td.hausse,
+.data-table td.baisse {
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/*  8. Feux : cartes de phase, schéma du carrefour, cycle              */
+/* ------------------------------------------------------------------ */
+
+.phase-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: var(--surface);
+}
+
+.phase-card.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-doux);
+}
+
+.phase-card header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.phase-name {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+}
+
+.phase-name:hover,
+.phase-name:focus {
+  border-color: var(--bordure);
+  background: #fff;
+}
+
+.carrefour {
+  display: block;
+  width: 100%;
+  max-width: 250px;
+  margin: 0 auto;
+}
+
+.carrefour .chaussee {
+  fill: var(--surface-2);
+  stroke: var(--bordure);
+}
+
+.carrefour .amorce {
+  stroke: var(--bordure-forte);
+  stroke-width: 10;
+  stroke-linecap: round;
+}
+
+.carrefour .amorce-label {
+  fill: var(--texte-doux);
+  font-size: 9px;
+}
+
+.carrefour .mouvement {
+  cursor: pointer;
+}
+
+/* Zone de clic élargie, invisible, sous chaque flèche. */
+.carrefour .cible {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+}
+
+.carrefour .fleche {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.carrefour .fleche.rouge,
+.carrefour .pointe.rouge {
+  stroke: var(--rouge-feu);
+  fill: none;
+  opacity: 0.4;
+}
+
+.carrefour .pointe.rouge {
+  fill: var(--rouge-feu);
+  stroke: none;
+}
+
+.carrefour .fleche.protege {
+  stroke: var(--vert-feu);
+}
+
+.carrefour .pointe.protege {
+  fill: var(--vert-feu);
+}
+
+.carrefour .fleche.permis {
+  stroke: var(--orange-feu);
+  stroke-dasharray: 6 4;
+}
+
+.carrefour .pointe.permis {
+  fill: var(--orange-feu);
+}
+
+.carrefour .mouvement:hover .fleche {
+  stroke-width: 4;
+}
+
+.carrefour .mouvement:focus-visible .cible {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.cycle-diagram {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cycle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.cycle-row.current .cycle-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cycle-label {
+  width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--texte-doux);
+}
+
+.cycle-track {
+  position: relative;
+  flex: 1;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.cycle-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.cycle-bar.vert { background: var(--vert-feu); }
+.cycle-bar.orange { background: var(--orange-feu); }
+.cycle-bar.rouge { background: var(--rouge-feu); }
+
+.cycle-value {
+  width: 46px;
+  text-align: right;
+  color: var(--texte-doux);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/*  9. Graphiques et fenêtres modales                                  */
+/* ------------------------------------------------------------------ */
+
+.chart {
+  width: 100%;
+}
+
+.chart.empty {
+  border-radius: var(--rayon);
+  background: var(--surface-2);
+}
+
+.chart svg {
+  display: block;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 2px;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  color: var(--texte-doux);
+}
+
+.chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.chart .grid {
+  stroke: var(--bordure);
+  stroke-width: 1;
+}
+
+.chart .axis {
+  fill: var(--texte-doux);
+  font-size: 10px;
+}
+
+.chart .serie {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart .cursor {
+  stroke: var(--bordure-forte);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+/* Le texte de l'infobulle est cerné de blanc pour rester lisible au-dessus des courbes. */
+.chart .tooltip {
+  fill: var(--texte);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 24, 40, 0.45);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  min-width: 340px;
+  max-width: min(680px, 92vw);
+  max-height: 86vh;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgba(16, 24, 40, 0.28);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bordure);
+}
+
+.modal-header h2 {
+  font-size: 14px;
+}
+
+.modal-body {
+  padding: 12px;
+  overflow: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/*  10. Carte : conteneur Leaflet, calques canvas, contrôles, légende  */
+/* ------------------------------------------------------------------ */
+
+.carte {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: #e7ebf1;
+}
+
+.carte-conteneur {
+  position: absolute;
+  inset: 0;
+}
+
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #e7ebf1;
+  font: inherit;
+}
+
+/*
+ * Calques canvas ajoutés au pane des calques : Leaflet les positionne avec `setPosition` / `setTransform`,
+ * ce qui suppose une origine de transformation en haut à gauche (comme `.leaflet-zoom-animated`).
+ */
+.carte-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.leaflet-zoom-anim .carte-canvas {
+  transition: transform 0.25s cubic-bezier(0, 0, 0.25, 1);
+}
+
+.carte-controles {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--ombre);
+  font-size: 12px;
+}
+
+.carte-bascule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.carte-outil-actif {
+  margin-top: 2px;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--rayon);
+  background: var(--accent-doux);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  max-width: 230px;
+}
+
+.carte-legende {
+  position: absolute;
+  left: 8px;
+  bottom: 24px;
+  z-index: 1000;
+  max-width: 70%;
+  padding: 6px 8px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--ombre);
+  font-size: 11px;
+}
+
+.carte-legende-titre {
+  margin-bottom: 3px;
+  font-weight: 600;
+}
+
+.carte-legende-bandes {
+  display: flex;
+}
+
+.carte-legende-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 42px;
+}
+
+.carte-legende-pastille {
+  display: block;
+  width: 100%;
+  height: 10px;
+}
+
+.carte-legende-valeur {
+  color: var(--texte-doux);
+  font-variant-numeric: tabular-nums;
+}
+
+.carte-legende-unite {
+  margin-top: 2px;
+  color: var(--texte-doux);
+}
+
+.leaflet-control-attribution {
+  font-size: 10px;
+}
+
+/* Légende qualitative (mode « classe de voie ») */
+.carte-legende-classes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, auto));
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+
+.carte-legende-classe {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.carte-legende-nom {
+  font-size: 11px;
+  color: var(--texte-doux);
+  white-space: nowrap;
+}
+
+.carte-legende-vide {
+  margin-top: 4px;
+  max-width: 220px;
+  color: var(--texte-doux);
+  font-size: 11px;
+}
+
+/* Bouton d'interruption dans la bannière d'activité (chargement d'une commune). */
+.banner-action {
+  flex: none;
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: var(--rayon);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.banner-action:hover {
+  background: rgba(0, 0, 0, 0.06);
+}

@@ -1,0 +1,52 @@
+# Bloc de configuration Caddy du site https://circulation.chaux.me
+#
+# Copie exacte de ce qui est en service à la fin de /etc/caddy/Caddyfile.
+# Sur une machine neuve : ajouter ce bloc à la fin de /etc/caddy/Caddyfile,
+# adapter le domaine et la racine si besoin, puis
+#     sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#     sudo systemctl reload caddy
+# Caddy obtient et renouvelle seul le certificat, à condition que le DNS du
+# domaine pointe déjà sur la machine.
+#
+# Simulateur de circulation routière (dépôt ~/circulation, build Vite statique).
+# Application 100 % navigateur : aucun service applicatif, seulement des fichiers.
+circulation.chaux.me {
+    root * /var/www/circulation.chaux.me
+    encode zstd gzip
+    file_server
+
+    # Les bundles portent un hash de contenu : cache définitif côté navigateur.
+    # Le matcher `file` limite l'en-tête aux fichiers qui existent réellement : sans lui,
+    # un 404 sur un ancien bundle serait mémorisé un an par le navigateur, sans révalidation
+    # possible, et resterait empoisonné après correction côté serveur.
+    @assets {
+        path /assets/*
+        file
+    }
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+
+    # Extraits OpenStreetMap de démonstration : noms stables, contenu susceptible
+    # de changer à un redéploiement, donc revalidation quotidienne.
+    @demo {
+        path /demo/*
+        file
+    }
+    header @demo Cache-Control "public, max-age=86400, must-revalidate"
+
+    # index.html référence les bundles hachés : il doit être revalidé à chaque visite,
+    # sinon un ancien index pointerait vers des fichiers supprimés après mise à jour.
+    @html path / /index.html
+    header @html Cache-Control "no-cache"
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Le site est servi exclusivement en HTTPS ; sans includeSubDomains, la directive
+        # ne concerne que circulation.chaux.me et n'engage aucun autre sous-domaine.
+        Strict-Transport-Security "max-age=31536000"
+        # Application statique sans backend : tout vient de cette origine, sauf le fond de
+        # carte OpenStreetMap et les API publiques interrogées depuis le navigateur.
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src 'self' https://geo.api.gouv.fr https://overpass-api.de https://overpass.kumi.systems https://lz4.overpass-api.de; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+        -Server
+    }
+}
