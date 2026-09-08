@@ -493,3 +493,60 @@ export function shortestPathNodes(network: Network, from: NodeId, to: NodeId): N
   path.reverse()
   return path
 }
+
+/* ----------------------------- Coût dynamique d'un tronçon ----------------------------- */
+
+/** Constante de temps (s) de la moyenne glissante des temps de parcours (routage dynamique, §5.5). */
+export const TRAVEL_EMA_TAU = 300
+
+/**
+ * Exposant du taux de remplissage dans le retard de surcharge. La remontée de file ne pénalise l'amont
+ * que lorsque le stockage est réellement proche de la saturation : à mi-tronçon la file s'écoule encore
+ * normalement, et sur-réagir à une file passagère ferait basculer le routage d'un itinéraire à l'autre à
+ * chaque recalcul. L'exposant 4 est celui de la fonction BPR classique des modèles d'affectation.
+ */
+const OVERFLOW_EXPONENT = 4
+
+/**
+ * Plafond du terme de surcharge (facteur ≤ 10) : à stockage plein, le retard réel n'est plus borné,
+ * mais le routage compare des coûts et n'a que faire d'un infini — il lui suffit que le tronçon bouché
+ * soit hors de portée de tout détour raisonnable.
+ */
+const MAX_OVERFLOW = 0.9
+
+/**
+ * Ramène une moyenne glissante de temps de parcours vers le temps à vide, au prorata du temps écoulé
+ * depuis la dernière mesure.
+ *
+ * La moyenne n'est alimentée que par les véhicules qui SORTENT du tronçon : sans sortie, elle resterait
+ * figée sur la dernière congestion observée et le routage éviterait à jamais un tronçon redevenu libre.
+ * L'absence de mesure est pourtant une information en soi — personne n'y circule — et on la traite comme
+ * une observation continue du temps à vide, avec la constante de temps de la moyenne. Un tronçon très
+ * fréquenté, mesuré en permanence, n'est pas affecté (l'intervalle écoulé y est de quelques secondes).
+ */
+export function decayTowardFree(ema: number, freeTime: number, elapsed: number): number {
+  if (!(elapsed > 0)) return ema
+  return freeTime + (ema - freeTime) * Math.exp(-elapsed / TRAVEL_EMA_TAU)
+}
+
+/**
+ * Retard (s) qu'impose la file présente sur un tronçon au véhicule qui s'y engagerait maintenant.
+ * `queue` est la longueur de file moyenne (et non un relevé instantané, trop dépendant de la phase du
+ * cycle de feux au moment du recalcul).
+ *
+ * C'est le pendant indispensable de la décroissance ci-dessus : un tronçon bouché dont l'aval est saturé
+ * ne laisse sortir personne, donc n'est jamais mesuré ; le laisser retomber au temps à vide le rendrait
+ * attractif alors qu'il est le plus congestionné du réseau. Deux termes :
+ *  - l'écoulement de la file visible : les `queue` véhicules en attente ne peuvent franchir la ligne
+ *    d'arrêt plus vite que le débit de décharge du tronçon, d'où une attente d'au moins `queue / débit` ;
+ *  - la surcharge : quand la file occupe une part `x` du stockage, la remontée déborde sur l'amont et
+ *    l'attente réelle dépasse celle de la seule file visible. Le facteur `1 / (1 − x⁴)` est la forme
+ *    classique du retard de surcharge d'une file déterministe, tempérée par l'exposant de la BPR : il
+ *    vaut 1 tant que le tronçon n'est qu'à moitié plein et explose quand le stockage se sature.
+ */
+export function queueDelay(queue: number, storage: number, dischargeRate: number): number {
+  if (queue <= 0 || dischargeRate <= 0) return 0
+  const fill = Math.min(queue / Math.max(1, storage), 1)
+  const overflow = Math.min(fill ** OVERFLOW_EXPONENT, MAX_OVERFLOW)
+  return queue / dischargeRate / (1 - overflow)
+}

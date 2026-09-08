@@ -5,7 +5,7 @@
  * l'identité des objets non modifiés** : le rendu canvas mémoïse ses caches sur l'identité des `NetEdge`,
  * et le store en tire des patches immer minimaux.
  */
-import type { ControllerId, EdgeId, GreenKind, HighwayClass, MovementKey, NetEdge, Network, NodeControl, NodeId, SignalController, SignalPhase } from '@/model/types'
+import type { ControllerId, EdgeId, GreenKind, HighwayClass, MovementKey, NetEdge, NetNode, Network, NodeControl, NodeId, SignalController, SignalPhase } from '@/model/types'
 import { parseMovementKey } from '@/model/types'
 import { polylineLength } from '@/model/geometry'
 
@@ -98,6 +98,39 @@ export function sanitizeNetwork(network: Network): Network {
 /* ------------------------------------------------------------------ */
 /*  Nœuds                                                              */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Prochain identifiant de nœud créé par l'éditeur : `x{max + 1}`, même convention que `nextEdgeId`.
+ *
+ * Le préfixe `x` ne peut pas entrer en collision avec les nœuds venus d'OpenStreetMap, tous nommés
+ * `n{osmId}` : un nœud posé à la main reste donc reconnaissable, et un réimport ne le recouvre pas.
+ */
+export function nextNodeId(network: Network): NodeId {
+  let max = 0
+  for (const id of Object.keys(network.nodes)) {
+    const m = /^x(\d+)$/.exec(id)
+    if (m) max = Math.max(max, Number(m[1]))
+  }
+  return `x${max + 1}`
+}
+
+/**
+ * Pose un nœud isolé aux coordonnées locales indiquées (en mètres, arrondies au centimètre).
+ *
+ * Il naît sans tronçon : il ne sert à rien tant qu'une voie n'y aboutit pas, mais il survit à
+ * `sanitizeNetwork` et n'est ni une entrée ni une sortie (`boundary` faux), donc il ne pèse ni sur la
+ * demande ni sur la simulation. C'est l'unique moyen de raccorder une voie nouvelle ailleurs qu'aux
+ * points fournis par OpenStreetMap.
+ */
+export function addNode(network: Network, x: number, y: number, label?: string): Network {
+  // Une coordonnée non finie produirait un nœud indessinable et refusé au rechargement du projet.
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return network
+  const id = nextNodeId(network)
+  const node: NetNode = { id, x: roundCm(x), y: roundCm(y), boundary: false }
+  const trimmed = label?.trim()
+  if (trimmed) node.label = trimmed
+  return { ...network, nodes: { ...network.nodes, [id]: node } }
+}
 
 /** Déplace un nœud : coordonnées arrondies au centimètre, extrémités et longueurs des tronçons incidents mises à jour. */
 export function moveNode(network: Network, id: NodeId, x: number, y: number): Network {

@@ -210,8 +210,23 @@ toute la simulation (numérotation dans l'ordre des arrivées) pour permettre l'
 ### 5.5 Itinéraires (`routing.ts`)
 - Graphe de tronçons : successeurs de `e` = `nodeMovements(network, e.to)` filtrés sur `from === e`. Tronçons fermés exclus.
   Un tronçon dont `to` est un nœud frontière n'a aucun successeur (`nodeMovements` renvoie `[]`) : on ne traverse pas la frontière.
-- Coût = temps de parcours libre `length / v` ; en routage dynamique, coût = EMA des temps mesurés (constante 300 s),
-  initialisé au temps libre, tables recalculées toutes les `routingIntervalMin` minutes (et à t = 0).
+- Coût = temps de parcours libre `length / v`. En routage dynamique, le coût est recalculé toutes les
+  `routingIntervalMin` minutes (et à t = 0) sur **l'état courant** du tronçon, et non sur le seul souvenir de
+  ses derniers passages :
+  `coût = max(EMA des temps mesurés ramenée vers le temps libre, tempsLibre + retard de la file présente)`.
+  - La moyenne des temps mesurés n'est alimentée qu'à la sortie d'un véhicule. Sans correctif, un tronçon que
+    le routage cesse d'alimenter n'est plus jamais mesuré : sa moyenne reste figée sur la congestion passée,
+    le routage continue de l'éviter, et rien ne le réhabilite. Elle décroît donc vers le temps libre en
+    fonction du temps écoulé depuis la dernière observation (`decayTowardFree`, même constante de 300 s) :
+    l'absence de mesure est en soi l'indice que personne n'y circule.
+  - Symétriquement, un tronçon bouché dont aucun véhicule ne sort est lui aussi dépourvu de mesure ; le laisser
+    retomber au temps libre le rendrait attractif au pire moment. Le terme `queueDelay` majore donc le coût à
+    partir de la file moyenne présente, du stockage et du débit de décharge.
+  - La file retenue est une moyenne glissante et non un relevé instantané : pris au hasard dans un cycle de
+    feux, un relevé donne tantôt le creux tantôt la pointe et fait osciller le routage d'un itinéraire à l'autre.
+  - Limite connue : l'affectation reste « tout ou rien », tous les véhicules d'un intervalle prenant le même
+    itinéraire. Quand la demande dépasse la capacité de l'itinéraire choisi, le partage alterne d'un intervalle
+    au suivant au lieu de se répartir. Un intervalle de recalcul plus court lisse le phénomène.
 - Destinations « sortie » : Dijkstra inverse par nœud de sortie → `costToGo[edge]` (Float64Array), itinéraire construit
   par descente gloutonne (`argmin cost(e') + costToGo(e')`) au moment de l'injection.
 - Destinations « tronçon interne » : Dijkstra direct à cible unique depuis le tronçon d'origine, cache `(origine, destination)`
@@ -328,7 +343,10 @@ carte à droite avec légende (mode de couleur) et bascule fond de carte / véhi
   valeurs numériques du mode de couleur au zoom ≥ 16), surbrillance sélection/survol, chemin en cours (outil onde verte).
 - Interactions : clic = sélection (tolérance 8 px, nœuds prioritaires), glisser d'un nœud = `beginNodeDrag`/`dragNode`/`endNodeDrag`
   (Leaflet `dragging` désactivé pendant), dépôt sur un autre nœud (surligné) = fusion, `Suppr` = supprimer la sélection,
-  molette = zoom Leaflet, outils à deux clics via `toolClickNode`.
+  molette = zoom Leaflet, outils à deux clics via `toolClickNode`. L'outil `addNode` fait exception : il agit
+  sur un clic **n'importe où** et non sur un clic de nœud, la décision étant prise par `mapClickAction(tool, hit)`
+  (pure, donc vérifiable sans navigateur). Un nœud posé naît isolé : il ne devient utile qu'une fois raccordé
+  avec « Ajouter un tronçon », ce que dit l'aide de l'outil.
 - `colors.ts` : échelles séquentielles (flux, retard, saturation, file), divergente (deltas), qualitative (classes). Légende avec bornes.
 
 ### Panneaux (lot E)
@@ -437,6 +455,8 @@ export function createAppStore(opts?: AppStoreOptions): UseBoundStore<StoreApi<A
 export function sanitizeNetwork(network: Network): Network      // pur
 export function moveNode(network: Network, id: NodeId, x: number, y: number): Network
 export function mergeNodes(network: Network, sourceId: NodeId, targetId: NodeId): Network
+export function addNode(network: Network, x: number, y: number, label?: string): Network
+export function nextNodeId(network: Network): NodeId            // `x{k}`, numéroté sur les seuls nœuds
 
 // src/state/persistence.ts                                                         [C]
 export function getCachedExtract(code: string): Promise<OsmExtract | undefined>
@@ -530,7 +550,7 @@ Points tranchés pendant la réalisation, au-delà de la spécification ci-dessu
 | Vérification | Commande | État au 4 septembre 2026 |
 |---|---|---|
 | Types | `npm run typecheck` | 0 erreur |
-| Tests unitaires | `npm test` | 428 tests, 29 fichiers |
+| Tests unitaires | `npm test` | 463 tests, 31 fichiers |
 | Build de production | `npm run build` | réussi |
 | Parcours navigateur | `npm run e2e` | 7 parcours, en local comme sur le site déployé |
 

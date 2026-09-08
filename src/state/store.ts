@@ -808,6 +808,16 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         set({ drag: null })
       },
 
+      addNode(x, y, label): void {
+        const base = get().project
+        if (!base) return
+        // L'identifiant est lu avant l'écriture : `editNetwork` ne renvoie que le succès, et la
+        // sélection du nœud posé est ce qui le rend modifiable sans avoir à le retrouver au clic.
+        const id = edits.nextNodeId(base.network)
+        if (!editNetwork("Pose d'un nœud", (network) => edits.addNode(network, x, y, label))) return
+        get().select({ kind: 'node', id })
+      },
+
       updateNode(id, patch): void {
         editNetwork('Modification du nœud', (network) => {
           const node = network.nodes[id]

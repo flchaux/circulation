@@ -14,7 +14,7 @@ import { VEHICLE_STRIDE } from './protocol'
 import type { Arrival } from './demand'
 import { generateArrivals } from './demand'
 import type { EngineGraph, RouteResult } from './routing'
-import { Router, buildGraph } from './routing'
+import { Router, TRAVEL_EMA_TAU, buildGraph, decayTowardFree, queueDelay } from './routing'
 import { SIG_AMBER, SIG_FREE, SIG_GREEN_PERMITTED, SIG_GREEN_PROTECTED, SIG_RED, SignalEngine } from './signals'
 import type { SignalClock, SignalProbe } from './signals'
 import type { PriorityTables } from './priority'
@@ -24,8 +24,6 @@ import { createRng, shuffleInPlace, streamSeed } from './rng'
 
 /** Constante de temps (s) de l'EMA des flux de mouvement servant aux capacités de cession. */
 const FLOW_EMA_TAU = 60
-/** Constante de temps (s) de l'EMA des temps de parcours (routage dynamique). */
-const TRAVEL_EMA_TAU = 300
 
 interface Vehicle {
   id: number
@@ -91,6 +89,11 @@ export class Simulation {
   private lastActivity!: Float64Array
   private travelEma!: Float64Array
   private travelEmaTime!: Float64Array
+  /** Moyenne glissante de la longueur de file, échantillonnée à chaque pas (routage dynamique). */
+  private queueEma!: Float64Array
+  private queueEmaTime!: Float64Array
+  /** Poids d'un échantillon de file séparé du précédent par un pas de temps (précalculé). */
+  private readonly queueW: number
 
   /* --- état par mouvement --- */
   private budgetM!: Float64Array
@@ -130,6 +133,7 @@ export class Simulation {
     this.demand = init.demand
     this.settings = init.settings
     this.dt = init.settings.dt > 0 ? init.settings.dt : 1
+    this.queueW = 1 - Math.exp(-this.dt / TRAVEL_EMA_TAU)
     this.warmupS = Math.max(0, init.settings.warmupMin * 60)
     this.endT = this.warmupS + Math.max(0, init.settings.durationMin * 60)
 
@@ -178,6 +182,8 @@ export class Simulation {
     this.lastActivity = new Float64Array(n)
     this.travelEma = new Float64Array(n)
     this.travelEmaTime = new Float64Array(n)
+    this.queueEma = new Float64Array(n)
+    this.queueEmaTime = new Float64Array(n)
     this.inActive = new Uint8Array(n)
     this.dischargeList = new Int32Array(n)
     let lanes = 0
@@ -208,6 +214,8 @@ export class Simulation {
     this.lastActivity.fill(-Infinity)
     this.travelEma.set(g.freeTime)
     this.travelEmaTime.fill(0)
+    this.queueEma.fill(0)
+    this.queueEmaTime.fill(0)
     this.budgetM.fill(0)
     this.budgetMStep.fill(-2)
     this.flowEma.fill(0)
@@ -251,7 +259,7 @@ export class Simulation {
     const t = this.t
     this.prepare(t)
     if (this.settings.dynamicRouting && t - this.lastRoutingUpdate >= this.settings.routingIntervalMin * 60) {
-      this.router.setCosts(this.travelEma.slice())
+      this.router.setCosts(this.routingCosts(t))
       this.lastRoutingUpdate = t
     }
     this.injectArrivals(t)
@@ -627,6 +635,42 @@ export class Simulation {
     this.travelEmaTime[e] = t
   }
 
+  /**
+   * Coûts des tronçons pour un recalcul des itinéraires (§5.5).
+   *
+   * La moyenne glissante des temps mesurés ne suffit pas : elle n'est alimentée que par les véhicules qui
+   * SORTENT du tronçon. Un tronçon que le routage a cessé d'alimenter n'est donc plus jamais mesuré, sa
+   * moyenne reste figée sur sa dernière congestion et le routage l'évite à jamais — boucle fermée.
+   * Le coût combine donc deux lectures de l'état courant, dont on retient la plus défavorable :
+   *
+   *  - la mémoire des mesures, ramenée vers le temps à vide au prorata du temps écoulé depuis la dernière
+   *    observation (`decayTowardFree`) : ne plus rien mesurer sur un tronçon vide signifie que personne n'y
+   *    circule. La décroissance est écrite dans l'état et l'horodatage avancé jusqu'à ce recalcul, si bien
+   *    que la prochaine mesure ne pondère que l'intervalle qui la sépare d'ici : le temps écoulé n'est
+   *    jamais compté deux fois, et un tronçon mesuré en permanence n'est pas affecté ;
+   *  - le retard qu'impose la file présente sur le tronçon (`queueDelay`), qui couvre précisément le cas
+   *    laissé de côté par le premier terme : un tronçon bouché dont l'aval est saturé ne laisse sortir
+   *    personne, n'est donc jamais mesuré, et ne doit surtout pas redevenir « libre » pour autant.
+   */
+  private routingCosts(t: number): Float64Array {
+    const g = this.graph
+    const n = g.edgeIds.length
+    const cost = new Float64Array(n)
+    const laneFlow = this.settings.saturationFlow / 3600
+    for (let e = 0; e < n; e++) {
+      const free = g.freeTime[e]
+      const ema = decayTowardFree(this.travelEma[e], free, t - this.travelEmaTime[e])
+      this.travelEma[e] = ema
+      this.travelEmaTime[e] = t
+      // Un tronçon vidé sort de la liste active et n'est plus échantillonné : sa file est nulle depuis
+      // `queueEmaTime`, la moyenne glissante décroît donc du temps écoulé.
+      const queue = this.queueEma[e] * Math.exp(-(t - this.queueEmaTime[e]) / TRAVEL_EMA_TAU)
+      const selonFile = free + queueDelay(queue, this.capacity[e], g.lanes[e] * laneFlow)
+      cost[e] = ema > selonFile ? ema : selonFile
+    }
+    return cost
+  }
+
   /** Mouvement du véhicule en tête d'un tronçon, ou -1 (aucun véhicule prêt, ou véhicule à destination). */
   private headMovement(e: number): number {
     if (this.arrived[e] <= 0) return -1
@@ -684,10 +728,22 @@ export class Simulation {
 
   private sample(t: number): void {
     this.stats.beginSample(t)
+    // La file moyenne ne sert qu'au coût de routage : sans routage dynamique, rien à échantillonner.
+    const suivreFiles = this.settings.dynamicRouting
     for (let i = 0; i < this.active.length; i++) {
       const e = this.active[i]
       const q = this.arrived[e]
       if (q > 0) this.stats.sampleQueue(e, q, t)
+      if (!suivreFiles) continue
+      // Moyenne glissante de la file : la longueur instantanée oscille au rythme des cycles de feux et
+      // des créneaux de cession ; un relevé isolé au moment du recalcul en donnerait tantôt le creux,
+      // tantôt la pointe, et ferait basculer le routage d'un itinéraire à l'autre au gré de ce tirage.
+      // C'est la file moyenne qui mesure le retard subi (loi de Little), c'est elle qui pèse sur le coût.
+      const dt = t - this.queueEmaTime[e]
+      // `dt` vaut un pas sauf si le tronçon, vidé puis réoccupé, était sorti de la liste active.
+      const w = dt === this.dt ? this.queueW : 1 - Math.exp(-dt / TRAVEL_EMA_TAU)
+      this.queueEma[e] += w * (q - this.queueEma[e])
+      this.queueEmaTime[e] = t
     }
   }
 

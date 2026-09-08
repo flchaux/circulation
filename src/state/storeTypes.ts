@@ -22,8 +22,12 @@ export type Selection =
 
 export type ColorMode = 'class' | 'flow' | 'delay' | 'saturation' | 'speed' | 'queue' | 'deltaDelay' | 'deltaFlow'
 export type SidebarTab = 'ville' | 'reseau' | 'feux' | 'trafic' | 'resultats' | 'comparer'
-/** Outil carte : sélection/déplacement, tracé d'onde verte (clic sur deux nœuds), ajout de tronçon (clic sur deux nœuds). */
-export type MapTool = 'select' | 'greenwave' | 'addEdge'
+/**
+ * Outil carte : sélection/déplacement, tracé d'onde verte (clic sur deux nœuds), ajout de tronçon
+ * (clic sur deux nœuds), pose d'un nœud libre (**un seul clic, n'importe où sur la carte** : c'est le
+ * seul outil qui n'attend pas de clic sur un nœud existant, voir `addNode`).
+ */
+export type MapTool = 'select' | 'greenwave' | 'addEdge' | 'addNode'
 
 export interface UiState {
   tab: SidebarTab
@@ -206,6 +210,12 @@ export interface AppState {
   /** Fin du glisser : une seule entrée d'historique (aucune si la position est inchangée) ; `dropOn` fusionne le nœud dans la cible. */
   endNodeDrag(id: NodeId, dropOn?: NodeId): void
   cancelNodeDrag(): void
+  /**
+   * Pose un nœud libre aux coordonnées locales (m) indiquées et le sélectionne, pour qu'il soit
+   * immédiatement modifiable. Le nœud naît isolé (`boundary` faux, aucun tronçon) : il ne change rien à
+   * la demande ni à la simulation tant qu'un tronçon (`addEdge`) ne l'a pas raccordé au réseau.
+   */
+  addNode(x: number, y: number, label?: string): void
   updateNode(id: NodeId, patch: Partial<Pick<NetNode, 'label' | 'miniRoundabout'>>): void
   mergeNodes(sourceId: NodeId, targetId: NodeId): void
   deleteNode(id: NodeId): void
@@ -297,7 +307,7 @@ export interface AppState {
   setColorMode(mode: ColorMode): void
   setUi(patch: Partial<UiState>): void
   setTool(tool: MapTool): void
-  /** Clic sur un nœud avec un outil à deux clics (onde verte, ajout de tronçon). */
+  /** Clic sur un nœud avec un outil à deux clics (onde verte, ajout de tronçon) ; sans effet pour `addNode`. */
   toolClickNode(nodeId: NodeId): void
   clearError(): void
   setError(message: string): void

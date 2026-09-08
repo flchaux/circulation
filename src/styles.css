@@ -531,6 +531,29 @@ input[type='checkbox'] {
   cursor: default;
 }
 
+/*
+ * Variante en grille : quatre outils ne tiennent pas sur une ligne de 356 px sans que « Ajouter un
+ * tronçon » ne soit rogné (les libellés ne se coupent pas, `overflow: hidden` masquerait le dernier).
+ * Deux lignes de deux gardent les libellés entiers et la même apparence de groupe.
+ */
+.segmented--grille {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.segmented--grille button {
+  border-bottom: 1px solid var(--bordure);
+}
+
+/* Colonne de droite : pas de séparateur vertical ; dernière ligne : pas de séparateur horizontal. */
+.segmented--grille button:nth-child(2n) {
+  border-right: 0;
+}
+
+.segmented--grille button:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
 .badge {
   padding: 1px 5px;
   border: 1px solid var(--bordure);

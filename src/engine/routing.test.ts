@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { NetEdge, NetNode, Network } from '@/model/types'
-import { Router, buildGraph, shortestPathNodes } from './routing'
+import { Router, TRAVEL_EMA_TAU, buildGraph, decayTowardFree, queueDelay, shortestPathNodes } from './routing'
 
 function node(id: string, x: number, y: number, boundary = false): NetNode {
   return { id, x, y, boundary }
@@ -120,5 +120,35 @@ describe('shortestPathNodes', () => {
     expect(shortestPathNodes(diamond(), 'x', 'a')).toEqual([])
     expect(shortestPathNodes(diamond(), 'p', 'p')).toEqual(['p'])
     expect(shortestPathNodes(diamond(), 'p', 'inconnu')).toEqual([])
+  })
+})
+
+describe('coût dynamique d’un tronçon', () => {
+  it('ramène la moyenne vers le temps à vide faute de mesure', () => {
+    // Sans temps écoulé, rien ne bouge : une mesure fraîche fait foi.
+    expect(decayTowardFree(120, 20, 0)).toBe(120)
+    expect(decayTowardFree(120, 20, -5)).toBe(120)
+    // Une constante de temps écoulée retire 63 % de l'écart au temps à vide.
+    expect(decayTowardFree(120, 20, TRAVEL_EMA_TAU)).toBeCloseTo(20 + 100 * Math.exp(-1), 6)
+    // Un tronçon abandonné finit par retrouver son temps à vide.
+    expect(decayTowardFree(120, 20, 20 * TRAVEL_EMA_TAU)).toBeCloseTo(20, 3)
+    // Quelques secondes entre deux passages ne changent presque rien : un tronçon fréquenté
+    // garde la mémoire de ses mesures.
+    expect(decayTowardFree(120, 20, 2)).toBeGreaterThan(119)
+  })
+
+  it('majore le coût d’un tronçon selon la file présente', () => {
+    const debit = 0.5 // véh/s, soit 1 800 véh/h sur une voie
+    expect(queueDelay(0, 40, debit)).toBe(0)
+    // Sans débit de décharge connu, pas de majoration inventée.
+    expect(queueDelay(10, 40, 0)).toBe(0)
+    // Tronçon peu occupé : l'attente est simplement l'écoulement de la file, sans majoration.
+    expect(queueDelay(10, 40, debit)).toBeCloseTo(20, 0)
+    // La majoration croît avec la file…
+    expect(queueDelay(20, 40, debit)).toBeGreaterThan(queueDelay(10, 40, debit))
+    // … et le stockage saturé (remontée de file) coûte bien plus que le seul écoulement.
+    expect(queueDelay(40, 40, debit)).toBeGreaterThan(10 * queueDelay(4, 40, debit))
+    // À file égale, un tronçon court (donc plein) est plus pénalisé qu'un tronçon long.
+    expect(queueDelay(20, 20, debit)).toBeGreaterThan(queueDelay(20, 200, debit))
   })
 })

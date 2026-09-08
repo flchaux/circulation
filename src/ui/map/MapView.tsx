@@ -18,7 +18,7 @@ import L from 'leaflet'
 import { useAppStore } from '@/state/store'
 import { createProjection } from '@/geo/projection'
 import { shortestPathNodes } from '@/engine/routing'
-import type { AppState, Selection } from '@/state/storeTypes'
+import type { AppState, MapTool, Selection } from '@/state/storeTypes'
 import type { NodeId } from '@/model/types'
 import {
   HIT_TOLERANCE_PX, MERGE_TOLERANCE_PX, MapRenderer, VehicleInterpolator,
@@ -37,6 +37,46 @@ const REVEAL_ZOOM = 17
 const DRAG_THRESHOLD_PX = 3
 
 type LatLngLike = { lat: number; lng: number }
+
+/**
+ * Effet d'un clic simple sur la carte.
+ *  - `select`   : sélectionner l'élément cliqué (ou vider la sélection) ;
+ *  - `toolNode` : clic de nœud d'un outil à deux clics (onde verte, ajout de tronçon) ;
+ *  - `addNode`  : poser un nœud à l'endroit cliqué ;
+ *  - `none`     : clic ignoré (outil à deux clics, hors de tout nœud).
+ */
+export type MapClickAction =
+  | { kind: 'select'; selection: Selection }
+  | { kind: 'toolNode'; nodeId: NodeId }
+  | { kind: 'addNode' }
+  | { kind: 'none' }
+
+/**
+ * Décide de l'effet d'un clic selon l'outil actif, à partir du seul résultat du test de sélection.
+ *
+ * Extraite du gestionnaire d'événements pour être vérifiable sans navigateur : c'est ici que les outils
+ * se séparent, l'outil `addNode` agissant sur un clic **n'importe où** là où les deux autres attendent un
+ * clic de nœud.
+ */
+export function mapClickAction(tool: MapTool, hit: Selection): MapClickAction {
+  if (tool === 'select') return { kind: 'select', selection: hit }
+  // Les nœuds priment sur les tronçons dans `hitTest` : un `hit` de nœud est le nœud cliqué.
+  const node = hit?.kind === 'node' ? hit.id : null
+  if (tool === 'addNode') {
+    // Poser un nœud sur un nœud existant en empilerait deux au même point, impossibles à distinguer
+    // ensuite sur la carte. Le clic sélectionne alors celui qui est déjà là : c'est ce que l'on veut
+    // pour le raccorder.
+    return node ? { kind: 'select', selection: { kind: 'node', id: node } } : { kind: 'addNode' }
+  }
+  return node ? { kind: 'toolNode', nodeId: node } : { kind: 'none' }
+}
+
+/** Libellé du bandeau rappelant l'outil actif (et permettant d'en sortir). */
+const OUTIL_ACTIF: Record<Exclude<MapTool, 'select'>, string> = {
+  greenwave: S.carte.outilOndeVerteActif,
+  addEdge: S.carte.outilAjoutTronconActif,
+  addNode: S.carte.outilPoseNoeudActif,
+}
 
 /** Leaflet n'expose pas d'API publique pour suivre l'animation de zoom ; c'est la méthode qu'utilise son propre renderer. */
 interface ZoomAnimMap extends L.Map {
@@ -425,7 +465,10 @@ export function MapView(): JSX.Element {
 
       const hit = renderer.hitTest(state.project.network, point.x, point.y, HIT_TOLERANCE_PX)
       if (!sameSelection(hit, state.hover)) state.setHover(hit)
-      container!.style.cursor = hit ? 'pointer' : ''
+      // Outil de pose : le curseur en croix annonce que le clic vise un emplacement et non un objet —
+      // sauf au-dessus d'un nœud, que ce clic sélectionnerait au lieu d'en empiler un second.
+      const viseUnEmplacement = state.ui.tool === 'addNode' && hit?.kind !== 'node'
+      container!.style.cursor = viseUnEmplacement ? 'crosshair' : hit ? 'pointer' : ''
     }
 
     function onMouseUp(event: MouseEvent): void {
@@ -440,11 +483,12 @@ export function MapView(): JSX.Element {
         map.dragging.enable()
       } else if (pressPoint && point.distanceTo(pressPoint) <= DRAG_THRESHOLD_PX && state.project) {
         const hit = renderer.hitTest(state.project.network, point.x, point.y, HIT_TOLERANCE_PX)
-        if (state.ui.tool !== 'select') {
-          const node = renderer.hitTestNode(state.project.network, point.x, point.y, HIT_TOLERANCE_PX)
-          if (node) state.toolClickNode(node)
-        } else {
-          state.select(hit)
+        const action = mapClickAction(state.ui.tool, hit)
+        if (action.kind === 'select') state.select(action.selection)
+        else if (action.kind === 'toolNode') state.toolClickNode(action.nodeId)
+        else if (action.kind === 'addNode') {
+          const [x, y] = toLocal(point)
+          state.addNode(x, y)
         }
       }
       pressPoint = null
@@ -564,7 +608,7 @@ export function MapView(): JSX.Element {
         </label>
         {tool !== 'select' && (
           <button type="button" className="carte-outil-actif" onClick={() => setTool('select')}>
-            {tool === 'greenwave' ? S.carte.outilOndeVerteActif : S.carte.outilAjoutTronconActif}
+            {OUTIL_ACTIF[tool]}
           </button>
         )}
       </div>

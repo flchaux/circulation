@@ -256,6 +256,7 @@ export const S = {
     aucuneDonnee: 'Lancez une simulation pour colorer le réseau selon cet indicateur.',
     outilOndeVerteActif: 'Onde verte : cliquez le carrefour de départ puis celui d’arrivée (Échap pour annuler)',
     outilAjoutTronconActif: 'Ajout de tronçon : cliquez deux nœuds (Échap pour annuler)',
+    outilPoseNoeudActif: 'Pose d’un nœud : cliquez l’emplacement voulu (Échap pour annuler)',
   },
   ville: {
     titre: 'Commune',
@@ -302,6 +303,10 @@ export const S = {
     outilAjout: 'Ajouter un tronçon',
     outilOndeAide: 'Cliquez deux nœuds : les décalages des feux du trajet sont recalculés.',
     outilAjoutAide: 'Cliquez deux nœuds pour créer un tronçon entre eux.',
+    outilNoeud: 'Poser un nœud',
+    outilNoeudAide: 'Cliquez l’emplacement voulu sur la carte : un nœud y est posé, puis sélectionné. Il sert à raccorder une voie nouvelle là où OpenStreetMap ne fournit aucun point.',
+    outilNoeudAideRaccord: 'Posé seul, il ne change rien : aucun véhicule n’y passe tant qu’aucun tronçon n’y aboutit. Pour le relier, prenez « Ajouter un tronçon » et cliquez ce nœud puis celui à joindre. Il se déplace, se fusionne et se supprime ensuite comme n’importe quel nœud du réseau.',
+    outilNoeudSurNoeud: 'Un clic sur un nœud existant le sélectionne au lieu d’en empiler un second au même endroit.',
     outilPremierNoeud: 'Premier nœud choisi : cliquez le second.',
     doubleSens: 'Double sens',
     noeud: 'Nœud',

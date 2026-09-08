@@ -28,6 +28,8 @@ npm run extract-city -- 42323 veauche   # pré-extraire une commune dans public/
    Le réseau routier est extrait d'OpenStreetMap et découpé au contour administratif de la commune.
 2. **Réseau** : déplacez les nœuds à la souris, fusionnez-les en les déposant l'un sur l'autre, modifiez le sens,
    la vitesse, le nombre de voies, fermez un tronçon, changez le type de carrefour, interdisez des mouvements.
+   Quatre outils complètent l'édition : poser un nœud d'un clic n'importe où sur la carte, relier deux nœuds par
+   un tronçon dont vous réglez la classe, les voies et la vitesse, et caler une onde verte le long d'un axe.
 3. **Feux** : réglez les phases mouvement par mouvement, les durées de vert, l'orange, le rouge intégral, le décalage
    entre carrefours pour créer une onde verte, ou passez un carrefour en mode adaptatif.
 4. **Feux, données réelles** : si votre commune vous a fourni ses dossiers de carrefour au format JSON

@@ -50,12 +50,21 @@ export function ReseauPanel(): JSX.Element {
 
       <section className="block">
         <h3>{S.reseau.outils}</h3>
-        <div className="segmented" role="group" aria-label={S.reseau.outils}>
+        {/* Quatre outils : une grille 2×2, les deux outils de création (nœud puis tronçon) côte à côte. */}
+        <div className="segmented segmented--grille" role="group" aria-label={S.reseau.outils}>
           <button type="button" className={tool === 'select' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('select')}>{S.reseau.outilSelection}</button>
-          <button type="button" className={tool === 'greenwave' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('greenwave')}>{S.reseau.outilOnde}</button>
+          <button type="button" className={tool === 'addNode' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('addNode')}>{S.reseau.outilNoeud}</button>
           <button type="button" className={tool === 'addEdge' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('addEdge')}>{S.reseau.outilAjout}</button>
+          <button type="button" className={tool === 'greenwave' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('greenwave')}>{S.reseau.outilOnde}</button>
         </div>
         {tool === 'greenwave' ? <p className="hint">{S.reseau.outilOndeAide}</p> : null}
+        {tool === 'addNode' ? (
+          <>
+            <p className="hint">{S.reseau.outilNoeudAide}</p>
+            <p className="hint">{S.reseau.outilNoeudAideRaccord}</p>
+            <p className="hint">{S.reseau.outilNoeudSurNoeud}</p>
+          </>
+        ) : null}
         {tool === 'addEdge' ? (
           <>
             <p className="hint">{S.reseau.outilAjoutAide}</p>
