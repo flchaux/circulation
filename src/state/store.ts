@@ -25,8 +25,8 @@ import type { FromWorker, SimClientFactory, SimClientLike } from '@/engine/proto
 import { shortestPathNodes } from '@/engine/routing'
 import { SimClient } from '@/engine/client'
 import type { OsmExtract } from '@/geo/types'
-import type { DossierImportResult, LibelleVoie } from '@/geo/dossierFeux'
-import { importDossiersFeux as lireDossiersFeux, libellesDeVoies, memeVoie, normaliserVoie } from '@/geo/dossierFeux'
+import type { DossierImportResult } from '@/geo/dossierFeux'
+import { candidatsPourDossier, importDossiersFeux as lireDossiersFeux } from '@/geo/dossierFeux'
 import type {
   AppState, AppStoreOptions, CarrefourCandidat, CsvImportReport, DossierImportReport, DossierNonRattache,
   Selection, SimState, UiState,
@@ -258,45 +258,7 @@ function edgeBetween(edgesFrom: NetEdge[] | undefined, to: NodeId): NetEdge | un
 
 /* ---------- Rattachement manuel d'un dossier de carrefour (§14.3) ---------- */
 
-interface CarrefourNomme {
-  nodeId: NodeId
-  /** Noms de rues du carrefour, normalisés comme le fait l'importeur. */
-  libelles: LibelleVoie[]
-  etiquette: string
-}
 
-/**
- * Carrefours du réseau susceptibles de porter un dossier, avec leurs rues.
- *
- * Même règle que l'importeur : un nœud déjà à feux, ou de trois branches au moins — un simple point de
- * coupure de rue n'est pas un carrefour. Le recensement est refait ici parce que `DossierMatch` ne rend
- * pas la liste des carrefours qu'il a jugés équivalents : sa phrase d'explication n'en cite que trois, et
- * par leur nom seul. La comparaison des noms, elle, reste celle de l'importeur (`normaliserVoie`,
- * `memeVoie`) : les deux lectures ne peuvent pas diverger sur le fond.
- */
-function carrefoursDuReseau(network: Network): CarrefourNomme[] {
-  const adjacency = buildAdjacency(network)
-  const out: CarrefourNomme[] = []
-  for (const node of Object.values(network.nodes)) {
-    if (node.boundary) continue
-    const incidents = [...(adjacency.incoming.get(node.id) ?? []), ...(adjacency.outgoing.get(node.id) ?? [])]
-    if (!incidents.length) continue
-    const voisins = new Set<NodeId>()
-    const noms = new Set<string>()
-    for (const e of incidents) {
-      voisins.add(e.from === node.id ? e.to : e.from)
-      if (e.name) noms.add(e.name)
-    }
-    if (network.controls[node.id]?.type !== 'signals' && voisins.size < 3) continue
-    const libelles: LibelleVoie[] = []
-    for (const nom of noms) {
-      const v = normaliserVoie(nom)
-      if (v) libelles.push(v)
-    }
-    out.push({ nodeId: node.id, libelles, etiquette: node.label || [...noms].slice(0, 2).join(' / ') || node.id })
-  }
-  return out
-}
 
 /**
  * Dossiers bruts d'un fichier déjà analysé : la liste `carrefours` (ou `dossiers`), ou le tableau lui-même.
@@ -342,55 +304,7 @@ function voiesDeclarees(dossier: unknown): string[] {
   return out
 }
 
-/** Voies nommées par un dossier : celles de l'entête et celles de ses groupes, un nom n'étant compté qu'une fois. */
-function voiesDuDossier(dossier: unknown): LibelleVoie[] {
-  if (typeof dossier !== 'object' || dossier === null) return []
-  const brut = dossier as Record<string, unknown>
-  const groupes = Array.isArray(brut.groupes) ? brut.groupes : []
-  const voies = [
-    ...libellesDeVoies(brut.voies ?? brut.voies_plan),
-    ...groupes.flatMap((g) => libellesDeVoies(typeof g === 'object' && g !== null ? (g as Record<string, unknown>).voie : undefined)),
-  ]
-  const parNoyau = new Map<string, LibelleVoie>()
-  for (const v of voies) if (!parNoyau.has(v.noyau)) parNoyau.set(v.noyau, v)
-  return [...parNoyau.values()]
-}
 
-/**
- * Carrefours qui reconnaissent le plus de voies du dossier, à égalité : ceux entre lesquels l'importeur
- * a refusé de choisir. Liste vide quand aucun carrefour ne porte la moindre voie du dossier — le
- * rattachement reste alors possible, mais depuis la carte.
- *
- * Deux carrefours voisins portent souvent les deux mêmes rues (« Avenue Paccard / Place Jacques Raffin »
- * deux fois de suite) : ils sont alors numérotés, sans quoi la liste proposerait deux fois le même
- * libellé sans moyen de les distinguer autrement qu'en les montrant sur la carte.
- */
-function candidatsPourDossier(network: Network, dossier: unknown): CarrefourCandidat[] {
-  const voies = voiesDuDossier(dossier)
-  if (!voies.length) return []
-  let meilleur = 0
-  let retenus: CarrefourNomme[] = []
-  for (const carrefour of carrefoursDuReseau(network)) {
-    let reconnues = 0
-    for (const v of voies) if (carrefour.libelles.some((l) => memeVoie(v, l))) reconnues++
-    if (!reconnues) continue
-    if (reconnues > meilleur) {
-      meilleur = reconnues
-      retenus = [carrefour]
-    } else if (reconnues === meilleur) {
-      retenus.push(carrefour)
-    }
-  }
-  const comptes = new Map<string, number>()
-  for (const c of retenus) comptes.set(c.etiquette, (comptes.get(c.etiquette) ?? 0) + 1)
-  const rangs = new Map<string, number>()
-  return retenus.map((c) => {
-    if ((comptes.get(c.etiquette) ?? 0) < 2) return { nodeId: c.nodeId, etiquette: c.etiquette }
-    const rang = (rangs.get(c.etiquette) ?? 0) + 1
-    rangs.set(c.etiquette, rang)
-    return { nodeId: c.nodeId, etiquette: `${c.etiquette} (n° ${rang})` }
-  })
-}
 
 /**
  * Réseau où seuls les tronçons touchant `carrefour` gardent leur nom.

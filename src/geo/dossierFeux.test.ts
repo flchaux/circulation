@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import type { NetEdge, NetNode, Network, NodeId } from '@/model/types'
 import { DEFAULT_SIGNAL_TIMING } from '@/model/defaults'
-import { validateController } from '@/model/signals'
+import { phaseMovements, validateController } from '@/model/signals'
 import {
   heureEnMinutes, heuresDuTexte, importDossiersFeux, joursDuLibelle, memeVoie, normaliserVoie,
   plagesDuTexte, typeDeGroupeDeclare,
@@ -24,29 +24,30 @@ function constructeurReseau() {
   const nodes: Record<NodeId, NetNode> = {}
   const edges: Record<string, NetEdge> = {}
   const noeud = (id: string, x: number, y: number, boundary = false) => { nodes[id] = { id, x, y, boundary } }
+  const tronçon = (de: string, vers: string, nom: string, inverse?: string): NetEdge => ({
+    id: `${de}_${vers}`,
+    from: de,
+    to: vers,
+    reverseOf: inverse,
+    name: nom,
+    highway: 'secondary',
+    lanes: 1,
+    maxspeed: 50,
+    length: Math.hypot(nodes[de].x - nodes[vers].x, nodes[de].y - nodes[vers].y),
+    geometry: [[nodes[de].x, nodes[de].y], [nodes[vers].x, nodes[vers].y]],
+    roundabout: false,
+    closed: false,
+    bannedTo: [],
+    estimated: { lanes: false, maxspeed: false },
+  })
   const branche = (a: string, b: string, nom: string) => {
-    const longueur = Math.hypot(nodes[a].x - nodes[b].x, nodes[a].y - nodes[b].y)
-    const tronçon = (de: string, vers: string, inverse: string): NetEdge => ({
-      id: `${de}_${vers}`,
-      from: de,
-      to: vers,
-      reverseOf: inverse,
-      name: nom,
-      highway: 'secondary',
-      lanes: 1,
-      maxspeed: 50,
-      length: longueur,
-      geometry: [[nodes[de].x, nodes[de].y], [nodes[vers].x, nodes[vers].y]],
-      roundabout: false,
-      closed: false,
-      bannedTo: [],
-      estimated: { lanes: false, maxspeed: false },
-    })
-    edges[`${a}_${b}`] = tronçon(a, b, `${b}_${a}`)
-    edges[`${b}_${a}`] = tronçon(b, a, `${a}_${b}`)
+    edges[`${a}_${b}`] = tronçon(a, b, nom, `${b}_${a}`)
+    edges[`${b}_${a}`] = tronçon(b, a, nom, `${a}_${b}`)
   }
+  /** Tronçon à sens unique : `b` y gagne une approche, `a` n'en gagne aucune (il ne fait que la quitter). */
+  const sensUnique = (a: string, b: string, nom: string) => { edges[`${a}_${b}`] = tronçon(a, b, nom) }
   const reseau = (): Network => ({ nodes, edges, controls: {}, controllers: {} })
-  return { noeud, branche, reseau }
+  return { noeud, branche, sensUnique, reseau }
 }
 
 function reseauDeTest(): Network {
@@ -334,6 +335,9 @@ describe('import d’une fixture à deux carrefours', () => {
     expect(p2.movements).toContain('nBorne_cLib>cLib_w')
     expect(p2.movements).not.toContain('nBorne_cLib>cLib_sBorne')
     expect(m5.avertissements.some((a) => /traversée/i.test(a) && /géométrie/i.test(a))).toBe(true)
+    // Ces mouvements ne sont pas « interdits » par la traversée (§14.5) : l'avertissement ne doit pas
+    // laisser croire à l'exploitant qu'un rattachement de trop ferme une branche du carrefour.
+    expect(m5.avertissements.some((a) => /mouvements interdits/i.test(a))).toBe(false)
   })
 
   it('reporte le rappel piéton déclaré par la phase sur le groupe', () => {
@@ -341,13 +345,24 @@ describe('import d’une fixture à deux carrefours', () => {
     expect(c5.groups!.find((g) => g.id === 'P2')!.recall).toBeUndefined()
   })
 
-  it('ferme les mouvements que le vert piéton de la phase traverse', () => {
+  it('laisse au vert les mouvements que le vert piéton de la phase traverse, en cession (§14.5)', () => {
     const phaseA = c5.phases[0]
     expect(phaseA.name).toBe('Phase A Repos')
     expect(phaseA.groups).toEqual(['V1', 'P4'])
-    // P4 traverse la Croix de Borne : seuls les mouvements tout droit de la Libération restent verts.
-    expect(Object.keys(phaseA.movements).sort()).toEqual(['cJou_cLib>cLib_w', 'w_cLib>cLib_cJou'])
-    expect(phaseA.movements['w_cLib>cLib_cJou']).toBe('protected')
+    // P4 traverse la Croix de Borne, mais V1 est vert : les tourne-à-droite et tourne-à-gauche qui la
+    // franchissent gardent le vert et cèdent aux piétons. Les retirer de la phase mettrait ces
+    // mouvements au rouge à tous les cycles et rendrait `phase.movements` — que lit la carte —
+    // différent de ce que simule le moteur.
+    expect(Object.keys(phaseA.movements).sort()).toEqual([
+      'cJou_cLib>cLib_nBorne', 'cJou_cLib>cLib_sBorne', 'cJou_cLib>cLib_w',
+      'w_cLib>cLib_cJou', 'w_cLib>cLib_nBorne', 'w_cLib>cLib_sBorne',
+    ])
+    // Le déclassement en « permis » n'est pas écrit dans la phase : il dépend du cycle (une traversée sur
+    // bouton poussoir laisse le vert protégé quand personne n'appuie), c'est le moteur qui l'applique.
+    expect(phaseA.movements['w_cLib>cLib_sBorne']).toBe('protected')
+    const verts = phaseMovements(c5, phaseA)
+    expect(verts['w_cLib>cLib_cJou']).toBe('protected')
+    expect(verts['w_cLib>cLib_sBorne']).toBe('permitted')
   })
 
   it('reprend les mini et maxi comme vert minimal et maximal', () => {
@@ -499,6 +514,240 @@ describe('rattachement au réseau', () => {
     expect(res.controllers.c42.source).toBe('dossier VE005')
   })
 })
+
+/* ------------------------------------------------------------------ */
+/*  Score de rattachement : les rues du carrefour, pas les libellés     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Le carrefour décalé du Chemin des Granges, tel qu'OpenStreetMap décrit celui de Veauche : deux nœuds
+ * à cinquante mètres, dont aucun ne réunit les quatre branches du dossier.
+ *  - `cVillemagne` ne voit arriver que la Rue Barthelemy Villemagne, par ses deux côtés ; le « Chemin des
+ *    Granges » n'en est qu'une sortie, à sens unique, vers le carrefour voisin ;
+ *  - `cGaulle` est le vrai carrefour : l'avenue (la RD 1082, qu'OSM ne nomme jamais par sa référence)
+ *    et le Chemin des Granges.
+ */
+function reseauCarrefourDecale(): Network {
+  const { noeud, branche, sensUnique, reseau } = constructeurReseau()
+  noeud('cVillemagne', 0, 0)
+  noeud('nVillemagne', 0, 200, true)
+  noeud('sVillemagne', 0, -200, true)
+  noeud('cGaulle', 55, -20)
+  noeud('wGaulle', -145, -20, true)
+  noeud('eGaulle', 255, -20, true)
+  noeud('nGranges', 55, 180, true)
+  branche('nVillemagne', 'cVillemagne', 'Rue Barthelemy Villemagne')
+  branche('sVillemagne', 'cVillemagne', 'Rue Barthelemy Villemagne')
+  sensUnique('cVillemagne', 'cGaulle', 'Chemin des Granges')
+  branche('wGaulle', 'cGaulle', 'Avenue du Général de Gaulle')
+  branche('eGaulle', 'cGaulle', 'Avenue du Général de Gaulle')
+  branche('nGranges', 'cGaulle', 'Chemin des Granges')
+  return reseau()
+}
+
+/** Le dossier « RD 1082 / Chemin des Granges » de Veauche, réduit à ce qui sert au rattachement. */
+function granges(): Record<string, unknown> {
+  return {
+    id: 'RD1082/CHEMIN DES GRANGES',
+    nom: 'RD 1082 / Chemin des Granges',
+    voies: ['RD 1082', 'Chemin des Granges', 'Rue Barthélémy Villemagne'],
+    groupes: [
+      { id: 'V1', type: 'vehicule', voie: 'RD 1082, arrivée est' },
+      { id: 'P2', type: 'pieton', voie: 'Traversée de la RD 1082, côté est' },
+      { id: 'V3', type: 'vehicule', voie: 'Rue Barthélémy Villemagne (branche sud)' },
+      { id: 'P4', type: 'pieton', voie: 'Traversée de la branche Villemagne' },
+      { id: 'V7', type: 'vehicule', voie: 'Chemin des Granges (branche nord)' },
+      { id: 'P8', type: 'pieton', voie: 'Traversée du Chemin des Granges' },
+    ],
+    phases: [
+      { nom: 'Phase A', vehicules: ['V1'], pietons: ['P8'], mini_s: 10, maxi_s: 40 },
+      { nom: 'Phase B', vehicules: ['V3', 'V7'], pietons: ['P2', 'P4'], mini_s: 8, maxi_s: 20 },
+    ],
+  }
+}
+
+describe('score de rattachement', () => {
+  it('ne compte pas deux fois la rue qu’une traversée piétonne franchit', () => {
+    const { noeud, branche, reseau } = constructeurReseau()
+    noeud('cVillemagne', 0, 0)
+    noeud('nVillemagne', 0, 200, true)
+    noeud('sVillemagne', 0, -200, true)
+    noeud('eLamartine', 200, 0, true)
+    branche('nVillemagne', 'cVillemagne', 'Rue Barthelemy Villemagne')
+    branche('sVillemagne', 'cVillemagne', 'Rue Barthelemy Villemagne')
+    branche('eLamartine', 'cVillemagne', 'Rue Lamartine')
+    const res = importDossiersFeux(fichier({
+      id: 'RD1082/CHEMIN DES GRANGES',
+      nom: 'RD 1082 / Chemin des Granges',
+      voies: ['Rue Barthélémy Villemagne'],
+      groupes: [
+        { id: 'V3', type: 'vehicule', voie: 'Rue Barthélémy Villemagne (branche sud)' },
+        { id: 'P4', type: 'pieton', voie: 'Traversée de la branche Villemagne' },
+      ],
+      phases: [{ nom: 'Phase A', vehicules: ['V3'], pietons: ['P4'], mini_s: 10, maxi_s: 30 }],
+    }), { network: reseau() })
+    const m = res.matches[0]
+    expect(m.nodeId).toBe('cVillemagne')
+    // Une seule rue du carrefour est nommée par le dossier, écrite deux fois : le rattachement reste
+    // à confirmer. Comptée deux fois, elle donnerait une certitude qu'aucune donnée ne soutient.
+    expect(m.confiance).toBe('probable')
+    expect(m.raison).toMatch(/une seule voie/)
+    expect(m.raison).toContain('Rue Barthelemy Villemagne')
+    expect(m.raison).not.toContain('branche Villemagne')
+    expect(m.raison).toContain('sur 2 rues qui y arrivent')
+  })
+
+  it('ne compte pas comme rue du carrefour celle qu’on ne fait qu’en partir', () => {
+    // Dossier sans traversées : seul le sens unique sortant peut encore gonfler le score du voisin.
+    const dossier = granges()
+    dossier.groupes = (dossier.groupes as Record<string, unknown>[]).filter((g) => g.type !== 'pieton')
+    dossier.phases = [{ nom: 'Phase A', vehicules: ['V1'], mini_s: 10, maxi_s: 40 }, { nom: 'Phase B', vehicules: ['V3', 'V7'], mini_s: 8, maxi_s: 20 }]
+    const res = importDossiersFeux(fichier(dossier), { network: reseauCarrefourDecale() })
+    const m = res.matches[0]
+    // Le Chemin des Granges part de « cVillemagne » sans y arriver : ce nœud ne porte qu'une rue du dossier.
+    expect(m.confiance).toBe('incertaine')
+    expect(m.nodeId).toBeNull()
+    expect(m.raison).toMatch(/2 carrefours/)
+  })
+
+  it('ne pose pas un plan de feux, avec certitude, sur le voisin du carrefour décrit', () => {
+    const res = importDossiersFeux(fichier(granges()), { network: reseauCarrefourDecale() })
+    const m = res.matches[0]
+    // Aucun des deux nœuds du carrefour décalé ne réunit les branches du dossier : l'exploitant tranchera.
+    expect(m.confiance).not.toBe('sure')
+    expect(m.nodeId).toBeNull()
+    expect(m.raison).toMatch(/2 carrefours/)
+    expect(res.controllers).toEqual({})
+    expect(res.controls).toEqual({})
+  })
+
+  it('n’énumère que les rues du nœud retenu, dans l’écriture du réseau', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE005',
+      nom: 'Croix de Borne / Masourenok',
+      voies: ['Rue du Dr Igor Masourenok', 'Rue de la Croix de Borne'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Rue du Dr Igor Masourenok' },
+        { id: 'P2', type: 'pieton', voie: 'Traversée Rue du Dr Igor Masourenok' },
+        { id: 'V3', type: 'vehicule', voie: 'Rue de la Croix de Borne' },
+      ],
+      phases: [
+        { nom: 'Phase A', vehicules: ['V1'], mini_s: 10, maxi_s: 40 },
+        { nom: 'Phase B', vehicules: ['V3'], pietons: ['P2'], mini_s: 8, maxi_s: 15 },
+      ],
+    }), { network: reseauEcritureOsm() })
+    const m = res.matches[0]
+    expect(m.nodeId).toBe('c')
+    // Le message doit nommer les rues du carrefour, l'écriture du dossier n'étant qu'un rappel :
+    // citer les libellés du dossier laisse croire qu'ils ont tous été retrouvés au nœud retenu.
+    expect(m.raison).toContain('Rue du Docteur Masourenok (dossier : Rue du Dr Igor Masourenok)')
+    expect(m.raison).toContain('Rue de la Croix Borne (dossier : Rue de la Croix de Borne)')
+    // L'avenue du carrefour n'est pas au dossier : le message dit combien de rues y arrivent en tout.
+    expect(m.raison).toContain('sur 3 rues qui y arrivent')
+    expect(m.raison).not.toContain('Traversée')
+  })
+
+  it('préfère, à nombre égal de rues, le carrefour dont les rues portent des groupes de feux', () => {
+    const { noeud, branche, reseau } = constructeurReseau()
+    // Le carrefour du dossier, puis l'entrée du lotissement 200 m à l'est, sur la même route.
+    noeud('cPagnol', 0, 0)
+    noeud('wBonnet', -200, 0, true)
+    noeud('nPagnol', 0, 200, true)
+    noeud('cSerins', 200, 0)
+    noeud('eBonnet', 400, 0, true)
+    noeud('sSerins', 200, -200, true)
+    branche('wBonnet', 'cPagnol', 'Route de Saint-Bonnet-les-Oules')
+    branche('nPagnol', 'cPagnol', 'Rue Marcel Pagnol')
+    branche('cPagnol', 'cSerins', 'Route de Saint-Bonnet-les-Oules')
+    branche('cSerins', 'eBonnet', 'Route de Saint-Bonnet-les-Oules')
+    branche('sSerins', 'cSerins', 'Lotissement les Serins')
+    const res = importDossiersFeux(fichier(ve004Reel()), { network: reseau() })
+    const m = res.matches[0]
+    // Les deux nœuds portent deux voies du dossier ; seul le premier en a deux commandées par un groupe.
+    expect(m.nodeId).toBe('cPagnol')
+    expect(m.confiance).toBe('sure')
+    // Les libellés de groupes commencent par « Voiture » et « Piéton » : ils doivent rester rattachables.
+    expect(m.groupesNonRattaches).toEqual([])
+    expect(m.groupesRattaches).toBe(5)
+  })
+
+  it('ne compte pas deux fois la route que le dossier nomme aussi par sa référence', () => {
+    const { noeud, branche, reseau } = constructeurReseau()
+    noeud('cPagnol', 0, 0)
+    noeud('wBonnet', -200, 0, true)
+    noeud('nPagnol', 0, 200, true)
+    noeud('sBonnet', 0, -200, true)
+    // Un nœud où la même route change d'écriture : « D 54 » d'un côté, son nom de l'autre.
+    noeud('cD54', 600, 0)
+    noeud('eD54', 800, 0, true)
+    noeud('wD54', 400, 0, true)
+    noeud('nBois', 600, 200, true)
+    branche('wBonnet', 'cPagnol', 'Route de Saint-Bonnet-les-Oules')
+    branche('sBonnet', 'cPagnol', 'Route de Saint-Bonnet-les-Oules')
+    branche('nPagnol', 'cPagnol', 'Rue Marcel Pagnol')
+    branche('wD54', 'cD54', 'Route de Saint-Bonnet-les-Oules')
+    branche('eD54', 'cD54', 'D 54')
+    branche('nBois', 'cD54', 'Chemin du Bois')
+    const dossier = ve004Reel()
+    // Le dossier désigne l'arrivée ouest par la référence de la route, l'arrivée est par son nom.
+    ;(dossier.groupes as Record<string, unknown>[])[2].voie = 'D 54, arrivée ouest'
+    const res = importDossiersFeux(fichier(dossier), { network: reseau() })
+    const m = res.matches[0]
+    // « D 54 » et « Route de Saint-Bonnet-les-Oules » sont la même route, le dossier le dit lui-même :
+    // le nœud qui les porte toutes deux ne réunit qu'une rue et ne peut pas égaler le vrai carrefour.
+    expect(m.nodeId).toBe('cPagnol')
+    expect(m.confiance).toBe('sure')
+  })
+
+  it('ramène au même noyau une traversée et la rue qu’elle franchit', () => {
+    // « Traversée », « Piéton » et « branche » sont des mots de type de voie : le nom propre seul subsiste.
+    expect(normaliserVoie('Traversée de la branche Villemagne')?.noyau).toBe('villemagne')
+    expect(normaliserVoie('Traversée du Chemin des Granges')?.noyau).toBe('granges')
+    expect(normaliserVoie('Piéton Av. Général de Gaulle')?.noyau).toBe('general de gaulle')
+    // Ce qui n'est pas un mot de type de voie reste au noyau : « Voiture … » n'est pas une traversée.
+    expect(normaliserVoie('Voiture Rue Marcel Pagnol')?.noyau).toBe('voiture rue marcel pagnol')
+    const traversee = normaliserVoie('Traversée de la branche Villemagne')!
+    const rue = normaliserVoie('Rue Barthelemy Villemagne')!
+    expect(memeVoie(traversee, rue)).toBe(true)
+  })
+
+  it('ne retient plus la traversée comme une voie distincte dans le bilan d’un dossier non rattaché', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE900',
+      nom: 'Carrefour d’une autre commune',
+      voies: ['Rue Barthélémy Villemagne'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Rue Barthélémy Villemagne' },
+        { id: 'P2', type: 'pieton', voie: 'Traversée de la branche Villemagne' },
+      ],
+      phases: [{ nom: 'Phase A', vehicules: ['V1'], pietons: ['P2'], mini_s: 10, maxi_s: 30 }],
+    }), opts)
+    const m = res.matches[0]
+    expect(m.confiance).toBe('aucune')
+    // Le dossier ne nomme qu'une voie : l'annoncer deux fois ferait chercher une rue qui n'existe pas.
+    expect(m.raison).toBe('aucune des voies du dossier (Rue Barthélémy Villemagne) ne correspond à un tronçon du réseau')
+  })
+})
+
+/** VE004 tel que le dossier réel l'écrit : libellés de groupes préfixés « Voiture » et « Piéton ». */
+function ve004Reel(): Record<string, unknown> {
+  return {
+    id: 'VE004',
+    nom: 'Rue Marcel Pagnol / Route de Saint-Bonnet-les-Oules',
+    voies: ['Route de Saint-Bonnet-les-Oules (D54)', 'Rue Marcel Pagnol', 'Lotissement les Serins'],
+    groupes: [
+      { id: 'V1', type: 'vehicule', voie: 'Voiture Route de Saint-Bonnet-les-Oules (arrivée est)' },
+      { id: 'P2', type: 'pieton', voie: 'Piéton Route de Saint-Bonnet-les-Oules (traversée est)' },
+      { id: 'V3', type: 'vehicule', voie: 'Voiture Route de Saint-Bonnet-les-Oules (arrivée ouest)' },
+      { id: 'V5', type: 'vehicule', voie: 'Voiture Rue Marcel Pagnol (arrivée nord)' },
+      { id: 'P6', type: 'pieton', voie: 'Piéton Rue Marcel Pagnol' },
+    ],
+    phases: [
+      { nom: 'Phase A', vehicules: ['V1', 'V3'], pietons: ['P6'], mini_s: 12, maxi_s: 40 },
+      { nom: 'Phase B', vehicules: ['V5'], pietons: ['P2'], mini_s: 8, maxi_s: 20 },
+    ],
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Plages horaires                                                    */
@@ -763,8 +1012,13 @@ describe('type des groupes', () => {
     const res = importDossiersFeux(fichier(dossier), opts)
     const c = res.controllers[res.matches[0].controllerId!]
     expect(c.groups?.map((g) => `${g.id}:${g.type}`)).toEqual(['V1:vehicule', 'P2:pieton', 'V3:vehicule', 'P4:pieton'])
-    // Pris pour un groupe véhicule, P4 ouvrirait les mouvements de la Croix de Borne au lieu de les fermer.
-    expect(Object.keys(c.phases[0].movements).sort()).toEqual(['cJou_cLib>cLib_w', 'w_cLib>cLib_cJou'])
+    // Pris pour un groupe véhicule, P4 ouvrirait au vert protégé les mouvements qui arrivent de la Croix
+    // de Borne — en conflit avec la Libération — au lieu de se contenter de retirer la protection.
+    expect(Object.keys(c.phases[0].movements).some((k) => /^[ns]Borne_/.test(k))).toBe(false)
+    expect(Object.keys(c.phases[0].movements).sort()).toEqual([
+      'cJou_cLib>cLib_nBorne', 'cJou_cLib>cLib_sBorne', 'cJou_cLib>cLib_w',
+      'w_cLib>cLib_cJou', 'w_cLib>cLib_nBorne', 'w_cLib>cLib_sBorne',
+    ])
   })
 
   it('se rabat sur le préfixe de l’identifiant quand le type est renseigné mais illisible, et le dit', () => {
@@ -1293,5 +1547,70 @@ describe('voie désignée par sa référence routière', () => {
     expect(cause).toMatch(/ne retient que le nom des voies/)
     // Ce n'est pas un problème de géométrie de traversée piétonne : ne pas y envoyer le technicien.
     expect(cause).not.toMatch(/traversée/)
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Traversées piétonnes concomitantes (§14.5)                         */
+/* ------------------------------------------------------------------ */
+
+describe('phase dont tous les mouvements franchissent une traversée verte', () => {
+  /**
+   * VE004 augmenté d'une traversée de la Rue Marcel Pagnol, verte avec la Route de Saint-Bonnet : le motif
+   * du carrefour VE004 réel de Veauche, dont la phase B n'ouvre qu'une branche en T. Les deux mouvements
+   * de cette branche débouchent sur la voie traversée, tous deux sont donc en cession.
+   */
+  function ve004AvecTraversee(): Record<string, unknown> {
+    const dossier = ve004()
+    ;(dossier.groupes as unknown[]).push({ id: 'P3', type: 'pieton', voie: 'Traversée Rue Marcel Pagnol' })
+    ;(dossier.phases as Record<string, unknown>[])[1].pietons = ['P3']
+    return dossier
+  }
+  const res = importDossiersFeux(fichier(ve004AvecTraversee()), opts)
+  const m = res.matches[0]
+  const c = res.controllers[m.controllerId!]
+  const phaseB = c.phases[1]
+
+  it('garde ces mouvements au vert et n’annonce plus une phase sans vert', () => {
+    expect(phaseB.groups).toEqual(['V2', 'P3'])
+    expect(Object.keys(phaseB.movements).sort()).toEqual(['eBonnet_cPagnol>cPagnol_nPagnol', 'eBonnet_cPagnol>cPagnol_sPagnol'])
+    // Ce que simule le moteur : deux verts permis, aucun rouge. L'ancien message parlait d'une phase sans
+    // aucun mouvement au vert, ce qui envoyait l'exploitant chercher un défaut inexistant.
+    expect(Object.values(phaseMovements(c, phaseB)).sort()).toEqual(['permitted', 'permitted'])
+    expect(m.avertissements.some((a) => /aucun mouvement au vert/.test(a))).toBe(false)
+  })
+
+  it('avertit que la phase n’ouvre aucun vert protégé et que sa capacité est optimiste', () => {
+    const a = m.avertissements.find((x) => x.startsWith('Phase « Phase B escamotable »'))!
+    expect(a).toMatch(/tous franchis par une traversée piétonne verte/)
+    // La traversée en cause est nommée : c'est par elle que l'exploitant remonte au dossier.
+    expect(a).toContain('P3')
+    expect(a).toMatch(/aucun vert protégé/)
+    expect(a).toMatch(/optimiste/)
+    // P3 est sur bouton poussoir : la cession ne vaut que les cycles où la traversée est appelée.
+    expect(a).toMatch(/bouton poussoir \(P3\)/)
+    // La phase A, elle, n'a pas de traversée concomitante : rien ne doit être dit à son sujet.
+    expect(m.avertissements.some((x) => x.startsWith('Phase « Phase A Repos »'))).toBe(false)
+  })
+
+  it('ne parle de bouton poussoir que pour une traversée qui n’est pas en rappel', () => {
+    const dossier = ve004AvecTraversee()
+    ;(dossier.phases as Record<string, unknown>[])[1].pietons_en_rappel = true
+    const autre = importDossiersFeux(fichier(dossier), opts)
+    const a = autre.matches[0].avertissements.find((x) => x.startsWith('Phase « Phase B escamotable »'))!
+    expect(a).toMatch(/tous franchis par une traversée piétonne verte/)
+    expect(a).not.toMatch(/bouton poussoir/)
+  })
+
+  it('ne nomme que les traversées qui franchissent réellement un mouvement ouvert', () => {
+    const dossier = ve004AvecTraversee()
+    // P5 traverse une voie absente de ce carrefour : elle ne franchit aucun mouvement, la citer
+    // enverrait l'exploitant vérifier une traversée qui n'y est pour rien.
+    ;(dossier.groupes as unknown[]).push({ id: 'P5', type: 'pieton', voie: 'Traversée Rue du Stade' })
+    ;(dossier.phases as Record<string, unknown>[])[1].pietons = ['P3', 'P5']
+    const autre = importDossiersFeux(fichier(dossier), opts)
+    const a = autre.matches[0].avertissements.find((x) => x.startsWith('Phase « Phase B escamotable »'))!
+    expect(a).toContain('P3')
+    expect(a).not.toContain('P5')
   })
 })

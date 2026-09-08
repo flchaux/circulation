@@ -363,6 +363,7 @@ export const S = {
     confirmerRegenerer: 'Remplacer les phases actuelles par le plan par défaut à deux phases ?',
     schema: 'Cliquez une flèche : rouge → protégé → permis',
     schemaGroupes: 'Verts déduits des groupes du dossier : le schéma n’est pas modifiable ici.',
+    schemaGroupesPietons: 'Les mouvements affichés « permis » le sont parce qu’une traversée piétonne de la phase les franchit : ils ont le vert et cèdent aux piétons.',
     rouge: 'Rouge',
     diagramme: 'Déroulement du cycle',
     aucunePhase: 'Aucune phase : tous les mouvements restent au rouge.',
@@ -391,6 +392,7 @@ export const S = {
     dossierSurCarte: 'sélectionné sur la carte',
     dossierSurCarteAucun: 'Aucun carrefour sélectionné sur la carte',
     dossierVoir: 'voir sur la carte',
+    dossierRuesRetrouvees: 'Rues communes avec le dossier :',
     dossierRattacher: 'Appliquer ce dossier au carrefour retenu',
     detacherDossier: 'Détacher le dossier',
     confirmerDetacher: 'Détacher le dossier de ce carrefour ? Ses groupes de signaux, ses plans horaires, son calendrier et ses inter-verts seront remplacés par le plan par défaut à deux phases.',
@@ -403,7 +405,10 @@ export const S = {
     groupeAucunMouvement: 'aucun mouvement',
     groupeRappel: 'Rappel',
     groupeRappelAide: 'Vert piéton donné à chaque cycle, sans appui sur un bouton poussoir.',
-    groupePietonAide: 'Un vert piéton interdit les mouvements véhicules qui franchissent sa traversée.',
+    /* §14.5 : une traversée verte en même temps que le groupe véhicule de sa branche déclasse le
+       mouvement, elle ne le ferme pas. Le laisser croire mettait huit mouvements de VE001 au rouge. */
+    groupePietonAide: 'Un vert piéton ne ferme pas les mouvements véhicules qui franchissent sa traversée : il les fait passer de protégé à permis, le conducteur qui tourne a le vert et cède aux piétons. Ces mouvements ne sont au rouge que pendant un temps piéton protégé, où aucun groupe véhicule de la branche n’est vert.',
+    groupePietonReserve: 'Réserve : la capacité d’un mouvement qui ne cède qu’à des piétons est optimiste, les dossiers ne portant aucune demande piétonne.',
     plans: 'Plans de feux',
     planCalendrier: 'Suivre le calendrier horaire',
     planCalendrierAide: 'Le contrôleur change de plan en fin de cycle, selon l’heure simulée.',

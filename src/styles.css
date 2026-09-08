@@ -1490,3 +1490,13 @@ input[type='checkbox'] {
 .banner-action:hover {
   background: rgba(0, 0, 0, 0.06);
 }
+
+/* Rues qui motivent un carrefour candidat, sous son libellé. */
+.candidat-rues {
+  display: block;
+  margin-top: 2px;
+  color: var(--texte-doux);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: normal;
+}

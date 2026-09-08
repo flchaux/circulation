@@ -530,7 +530,7 @@ Points tranchés pendant la réalisation, au-delà de la spécification ci-dessu
 | Vérification | Commande | État au 4 septembre 2026 |
 |---|---|---|
 | Types | `npm run typecheck` | 0 erreur |
-| Tests unitaires | `npm test` | 407 tests, 27 fichiers |
+| Tests unitaires | `npm test` | 428 tests, 29 fichiers |
 | Build de production | `npm run build` | réussi |
 | Parcours navigateur | `npm run e2e` | 7 parcours, en local comme sur le site déployé |
 
@@ -658,11 +658,21 @@ Un dossier est rattaché à un carrefour du réseau en comparant ses noms de voi
 La comparaison tolère les abréviations (Dr, St, Av, Rte…), les apostrophes typographiques, les mots outils
 surnuméraires et un prénom intercalé, sans jamais rapprocher deux voies réellement différentes.
 
+Le score se compte sur les rues **réellement distinctes qui arrivent** au carrefour, et non sur les libellés
+du dossier : une traversée piétonne et la rue qu'elle franchit ne comptent qu'une fois, deux écritures d'une
+même route non plus, et une rue que l'on ne fait que quitter en sens unique n'appartient pas au carrefour.
+Sans ces trois règles, un dossier se rattachait avec certitude au voisin du carrefour qu'il décrit. À nombre
+égal de rues retrouvées, le carrefour dont les rues portent des groupes de feux du dossier l'emporte : la
+liste de voies d'un dossier reprend aussi des repères du plan qui ne sont pas des branches.
+
 L'importeur **ne devine jamais** : à égalité entre plusieurs carrefours, il ne rattache rien et rend la liste
 des candidats. C'est le cas fréquent des carrefours décalés, qu'OpenStreetMap éclate en deux nœuds distants
 d'une dizaine de mètres dont aucun ne réunit toutes les branches du dossier. Sur les six dossiers de Veauche,
-trois se rattachent seuls et trois demandent un arbitrage. L'utilisateur tranche depuis le panneau Feux, via
+deux se rattachent seuls et quatre demandent un arbitrage. L'utilisateur tranche depuis le panneau Feux, via
 `rattacherDossier`, et l'opération reste annulable.
+
+Le store n'a pas sa propre règle : il appelle `candidatsPourDossier` de l'importeur. Une seconde règle, même
+proche, finirait par proposer à l'arbitrage des carrefours que l'import avait écartés.
 
 ### 14.4 bis Conventions et décisions de modélisation
 

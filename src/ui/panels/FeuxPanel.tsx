@@ -21,7 +21,7 @@ import type { DossierNonRattache } from '@/state/storeTypes'
 import type { Movement } from '@/model/geometry'
 import {
   activePlan, clockAt, controllerCycle, controllerMovements, describeMovement, phaseDuration, phaseMovements,
-  phaseTransition, planPhaseTiming, validateController,
+  phasePedestrianYields, phaseTransition, planPhaseTiming, validateController,
 } from '@/model/signals'
 import { NumberField } from '@/ui/components/NumberField'
 import { DAY_LABELS, GREEN_KIND_LABELS, S, SIGNAL_MODE_LABELS, formatNumber, formatTimeOfDay } from '@/ui/strings'
@@ -218,7 +218,14 @@ function DossierARattacher({ dossier }: { dossier: DossierNonRattache }): JSX.El
                 onMouseEnter={() => useAppStore.getState().setHover({ kind: 'node', id: c.nodeId })}
                 onMouseLeave={() => useAppStore.getState().setHover(null)}
               >
-                <span className="list-main">{c.etiquette}</span>
+                <span className="list-main">
+                  {c.etiquette}
+                  {c.ruesRetrouvees.length > 0 && (
+                    <span className="candidat-rues">
+                      {S.feux.dossierRuesRetrouvees} {c.ruesRetrouvees.join(', ')}
+                    </span>
+                  )}
+                </span>
                 <span className="list-side">{S.feux.dossierVoir}</span>
               </button>
             </li>
@@ -456,7 +463,10 @@ function PlanSelector(props: {
   )
 }
 
-/** Groupes de signaux du dossier ; les groupes piétons se distinguent, leur vert fermant des mouvements. */
+/**
+ * Groupes de signaux du dossier ; les groupes piétons se distinguent, leur vert retirant la protection des
+ * mouvements qui franchissent leur traversée sans jamais les fermer (§14.5).
+ */
 function GroupList({ controller }: { controller: SignalController }): JSX.Element | null {
   const groups = controller.groups
   if (!groups?.length) return null
@@ -478,7 +488,14 @@ function GroupList({ controller }: { controller: SignalController }): JSX.Elemen
           </li>
         ))}
       </ul>
-      {groups.some((g) => g.type === 'pieton') ? <p className="hint">{S.feux.groupePietonAide}</p> : null}
+      {/* La réserve suit l'explication : dire qu'un mouvement reste vert sans dire que sa capacité est
+          alors majorée laisserait lire les débits simulés pour argent comptant. */}
+      {groups.some((g) => g.type === 'pieton') ? (
+        <>
+          <p className="hint">{S.feux.groupePietonAide}</p>
+          <p className="hint">{S.feux.groupePietonReserve}</p>
+        </>
+      ) : null}
     </>
   )
 }
@@ -553,11 +570,15 @@ function PhaseCard(props: {
   // afficherait une valeur (celle du plan) et en écrirait une autre (celle de la phase).
   const timing = planPhaseTiming(phase, plan)
   const imposeParPlan = !!plan?.phases?.[phase.id]
-  // Phase écrite en groupes (dossier de carrefour) : les verts se déduisent des groupes ouverts, moins les
-  // mouvements que coupe un vert piéton. Les modifier mouvement par mouvement n'aurait aucun effet, le
-  // schéma est donc en lecture seule.
+  // Phase écrite en groupes (dossier de carrefour) : les verts se déduisent des groupes véhicules ouverts,
+  // une traversée verte de la même phase déclassant en « permis » les mouvements qu'elle franchit sans les
+  // fermer (§14.5). Les modifier mouvement par mouvement n'aurait aucun effet, le schéma est donc en
+  // lecture seule.
   const parGroupes = !!phase.groups?.length && !!controller.groups?.length
   const verts = parGroupes ? phaseMovements(controller, phase) : phase.movements
+  // Le « permis » d'un mouvement dérivé des groupes n'est pas lisible sur le schéma : sans cette note, un
+  // technicien ne peut pas savoir si la cession vise le flux d'en face ou la traversée piétonne.
+  const cedeAuxPietons = parGroupes && phasePedestrianYields(controller, phase).length > 0
 
   return (
     <article className={`phase-card${current ? ' current' : ''}`}>
@@ -600,6 +621,7 @@ function PhaseCard(props: {
         onToggle={(key, kind) => store.setPhaseMovement(controller.id, phase.id, key, kind)}
       />
       <p className="hint">{parGroupes ? S.feux.schemaGroupes : S.feux.schema} · {index + 1}/{controller.phases.length}</p>
+      {cedeAuxPietons ? <p className="hint">{S.feux.schemaGroupesPietons}</p> : null}
     </article>
   )
 }

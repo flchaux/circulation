@@ -277,7 +277,16 @@ export function normaliserVoie(brut: string): LibelleVoie | null {
   return { brut: brut.trim(), plein, noyau: noyau || plein }
 }
 
-/** Découpe un libellé composé (« Av. de Gaulle / Croix des Pères », « Libération (RD 1082) ») en voies. */
+/**
+ * Découpe un libellé composé (« Av. de Gaulle / Croix des Pères », « Libération (RD 1082) ») en voies.
+ *
+ * Un libellé de traversée piétonne y désigne la rue qu'elle franchit, et non une rue de plus :
+ * « Traversée », « Piéton », « TP » et « branche » sont des mots de type de voie (`TYPES_VOIE`), que
+ * `normaliserVoie` retire du noyau au même titre que « Rue » ou « Avenue ». « Traversée de la branche
+ * Villemagne » et « Rue Barthélémy Villemagne » se comparent donc déjà sur « villemagne » contre
+ * « barthelemy villemagne » ; c'est le dédoublonnage, ici et sur les rues du carrefour, qui les ramène à
+ * une seule et même voie.
+ */
 export function libellesDeVoies(brut: unknown): LibelleVoie[] {
   const out: LibelleVoie[] = []
   for (const texte of listeDeChaines(brut)) {
@@ -459,7 +468,8 @@ export function joursDuLibelle(brut: string): number[] | null {
 
 interface NoeudCandidat {
   id: NodeId
-  libelles: LibelleVoie[]
+  /** Rues qui ARRIVENT au carrefour, un libellé par écriture rencontrée. */
+  approches: LibelleVoie[]
   dejaFeux: boolean
   /** Étiquette lisible du carrefour, pour les messages. */
   etiquette: string
@@ -468,12 +478,19 @@ interface NoeudCandidat {
 /**
  * Carrefours du réseau susceptibles de porter un dossier : les nœuds déjà à feux et les nœuds
  * de trois branches ou plus (un simple point de coupure de rue n'est pas un carrefour).
+ *
+ * Seules les rues qui **arrivent** au nœud sont retenues pour le rapprochement. Un dossier de carrefour
+ * décrit les voies qui y débouchent et pose un groupe de feux sur chacune : une rue que l'on ne fait que
+ * quitter (sens unique sortant) n'a ni approche ni groupe. La compter crédite le nœud situé en aval du
+ * vrai carrefour — exactement le cas des carrefours décalés, où la sortie de l'un est la branche de
+ * l'autre, et où c'est ce point qui faisait rattacher un dossier au voisin du carrefour qu'il décrit.
  */
 function indexerCarrefours(network: Network, adj: Adjacency): NoeudCandidat[] {
   const out: NoeudCandidat[] = []
   for (const node of Object.values(network.nodes)) {
     if (node.boundary) continue
-    const incidents = [...(adj.incoming.get(node.id) ?? []), ...(adj.outgoing.get(node.id) ?? [])]
+    const entrants = adj.incoming.get(node.id) ?? []
+    const incidents = [...entrants, ...(adj.outgoing.get(node.id) ?? [])]
     if (!incidents.length) continue
     const voisins = new Set<NodeId>()
     const noms = new Set<string>()
@@ -483,15 +500,20 @@ function indexerCarrefours(network: Network, adj: Adjacency): NoeudCandidat[] {
     }
     const dejaFeux = network.controls[node.id]?.type === 'signals'
     if (!dejaFeux && voisins.size < 3) continue
-    const libelles: LibelleVoie[] = []
-    for (const nom of noms) {
-      const v = normaliserVoie(nom)
-      if (v) libelles.push(v)
+    const approches: LibelleVoie[] = []
+    const vues = new Set<string>()
+    for (const e of entrants) {
+      if (!e.name || vues.has(e.name)) continue
+      vues.add(e.name)
+      const v = normaliserVoie(e.name)
+      if (v) approches.push(v)
     }
     out.push({
       id: node.id,
-      libelles,
+      approches,
       dejaFeux,
+      // L'étiquette reste celle du carrefour entier, sorties comprises : elle sert à le désigner à
+      // l'exploitant, pas à le reconnaître.
       etiquette: node.label || [...noms].slice(0, 2).join(' / ') || node.id,
     })
   }
@@ -513,8 +535,9 @@ interface MouvementNomme {
  * Type d'un groupe d'après le libellé porté par le dossier, `null` si le libellé n'est pas reconnu.
  *
  * La reconnaissance est large parce que les dossiers écrivent aussi bien « pieton » que « traversée
- * piétonne » ou « TP » : un groupe piéton pris pour un groupe véhicule ouvrirait les mouvements qu'il doit
- * au contraire fermer, et le carrefour rendrait plus de débit qu'en réalité. Quand rien n'est reconnu,
+ * piétonne » ou « TP » : un groupe piéton pris pour un groupe véhicule ouvrirait au vert protégé les
+ * mouvements de la voie traversée, qu'il devrait au contraire se contenter de rendre permis (§14.5) — le
+ * carrefour rendrait plus de débit qu'en réalité, et en conflit. Quand rien n'est reconnu,
  * l'appelant se rabat sur le préfixe de l'identifiant et le dit, plutôt que de supposer « véhicule ».
  */
 export function typeDeGroupeDeclare(libelle: string): 'pieton' | 'vehicule' | null {
@@ -1056,16 +1079,141 @@ function lireRacine(raw: unknown): Racine {
   return { carrefours, avertissements }
 }
 
+/** Voie nommée par un dossier, avec ce qui la rend probante. */
+interface VoieDuDossier {
+  voie: LibelleVoie
+  /** Le dossier commande cette voie par un groupe de feux : c'est une approche qu'il signalise. */
+  groupe: boolean
+}
+
+/** Textes bruts où un dossier nomme des voies : entête, voies des groupes, et son propre nom. */
+function textesDeVoies(dossier: Rec, groupes: Rec[]): string[] {
+  return [
+    ...listeDeChaines(dossier.voies ?? dossier.voies_plan),
+    ...groupes.flatMap((g) => listeDeChaines(g.voie)),
+    chaine(dossier.nom),
+  ]
+}
+
+/**
+ * Voies réellement nommées par le dossier, chaque rue une seule fois.
+ *
+ * Le dédoublonnage se fait sur la voie désignée, pas sur le texte : l'entête, le groupe véhicule et la
+ * traversée piétonne d'une même branche l'écrivent de trois façons (« Rue Barthélémy Villemagne »,
+ * « Rue Barthélémy Villemagne (branche sud) », « Traversée de la branche Villemagne »). Les garder toutes
+ * les trois donnerait trois voies là où le dossier n'en nomme qu'une.
+ */
+function voiesDuDossier(dossier: Rec, groupes: Rec[]): VoieDuDossier[] {
+  const brutes: VoieDuDossier[] = [
+    ...libellesDeVoies(dossier.voies ?? dossier.voies_plan).map((voie) => ({ voie, groupe: false })),
+    ...groupes.flatMap((g) => libellesDeVoies(g.voie).map((voie) => ({ voie, groupe: true }))),
+  ]
+  const out: VoieDuDossier[] = []
+  for (const candidate of brutes) {
+    const deja = out.find((v) => memeVoie(v.voie, candidate.voie))
+    // L'entête est parcourue en premier : c'est son écriture, la plus complète, qui représente la rue.
+    if (deja) deja.groupe = deja.groupe || candidate.groupe
+    else out.push({ ...candidate })
+  }
+  return out
+}
+
+/** Ce qu'un carrefour du réseau montre d'un dossier. */
+interface RuesRetrouvees {
+  /** Rues du carrefour que le dossier nomme, écrites comme le réseau les écrit. */
+  libelles: string[]
+  /** Nombre de rues réellement distinctes qui arrivent à ce carrefour. */
+  ruesDuCarrefour: number
+  /** Combien de ces rues retrouvées le dossier commande par un groupe de feux. */
+  parGroupe: number
+}
+
+/**
+ * Rues d'un carrefour que le dossier nomme.
+ *
+ * Le compte porte sur les rues du CARREFOUR, pas sur les libellés du dossier : un carrefour d'une seule
+ * rue ne peut pas en rendre deux, quel que soit le nombre de façons dont le dossier l'écrit. Les libellés
+ * rendus sont ceux du réseau, l'écriture du dossier n'étant rappelée que lorsqu'elle en diffère — un
+ * message qui énumère des voies absentes du nœud retenu ne prévient de rien.
+ */
+function ruesRetrouvees(
+  noeud: NoeudCandidat,
+  voies: VoieDuDossier[],
+  memeRue: (a: LibelleVoie, b: LibelleVoie) => boolean,
+): RuesRetrouvees {
+  const rues: LibelleVoie[] = []
+  for (const l of noeud.approches) if (!rues.some((r) => memeRue(r, l))) rues.push(l)
+  const libelles: string[] = []
+  let parGroupe = 0
+  for (const rue of rues) {
+    const correspondants = voies.filter((v) => memeVoie(v.voie, rue))
+    if (!correspondants.length) continue
+    if (correspondants.some((v) => v.groupe)) parGroupe++
+    const identique = correspondants.some((v) => v.voie.plein === rue.plein)
+    libelles.push(identique ? rue.brut : `${rue.brut} (dossier : ${correspondants[0].voie.brut})`)
+  }
+  return { libelles, ruesDuCarrefour: rues.length, parGroupe }
+}
+
+/** Carrefour proposé à l'exploitant pour rattacher un dossier à la main. */
+export interface CandidatCarrefour {
+  nodeId: NodeId
+  /** Libellé du carrefour tel qu'on le désigne à l'exploitant (ses rues). */
+  etiquette: string
+  /** Rues du dossier retrouvées à ce carrefour, dans l'écriture du réseau. */
+  ruesRetrouvees: string[]
+}
+
+/**
+ * Carrefours entre lesquels l'importeur a refusé de choisir pour ce dossier, du plus concordant au moins.
+ *
+ * Le store s'en sert pour l'arbitrage manuel. Il DOIT passer par ici plutôt que refaire le calcul :
+ * une seconde règle de rattachement, même proche, finirait par proposer d'autres carrefours que ceux
+ * que l'import a écartés, donc à faire arbitrer entre de mauvais candidats.
+ */
+export function candidatsPourDossier(network: Network, dossier: unknown): CandidatCarrefour[] {
+  if (!estObjet(dossier)) return []
+  const carrefours = indexerCarrefours(network, buildAdjacency(network))
+  const c = evaluerCandidature(dossier, 0, carrefours)
+  const voies = c.voies
+  const references = referencesDuDossier(textesDeVoies(dossier, tableau(dossier.groupes).filter(estObjet)))
+  const resoudre = (l: LibelleVoie): LibelleVoie =>
+    (estReferenceRoutiere(l.noyau) ? references.get(l.noyau) ?? l : l)
+  const memeRue = (a: LibelleVoie, b: LibelleVoie): boolean =>
+    memeVoie(a, b) || memeVoie(resoudre(a), resoudre(b))
+
+  const retenus = c.exAequo.length ? c.exAequo : (c.meilleur ? [c.meilleur] : [])
+  // Deux carrefours voisins portent souvent les deux mêmes rues : on les numérote, sinon la liste
+  // proposerait deux fois le même libellé sans moyen de les distinguer autrement que sur la carte.
+  const comptes = new Map<string, number>()
+  for (const n of retenus) comptes.set(n.etiquette, (comptes.get(n.etiquette) ?? 0) + 1)
+  const rangs = new Map<string, number>()
+  return retenus.map((n) => {
+    const rues = ruesRetrouvees(n, voies, memeRue).libelles
+    let etiquette = n.etiquette
+    if ((comptes.get(n.etiquette) ?? 0) >= 2) {
+      const rang = (rangs.get(n.etiquette) ?? 0) + 1
+      rangs.set(n.etiquette, rang)
+      etiquette = `${n.etiquette} (n° ${rang})`
+    }
+    return { nodeId: n.id, etiquette, ruesRetrouvees: rues }
+  })
+}
+
 /** Rattachement d'un dossier à un carrefour du réseau, avant arbitrage des doublons. */
 interface Candidature {
   dossier: Rec
   dossierId: string
   nom: string
-  voies: LibelleVoie[]
+  voies: VoieDuDossier[]
   groupes: Rec[]
   meilleur: NoeudCandidat | null
+  /** Nombre de rues du carrefour retenu que le dossier nomme. */
   score: number
-  voiesReconnues: string[]
+  /** Ces rues, telles que le RÉSEAU les écrit au nœud retenu. */
+  ruesReconnues: string[]
+  /** Nombre de rues qui arrivent au nœud retenu, retrouvées ou non. */
+  ruesDuCarrefour: number
   exAequo: NoeudCandidat[]
 }
 
@@ -1073,36 +1221,45 @@ function evaluerCandidature(dossier: Rec, index: number, carrefours: NoeudCandid
   const dossierId = chaine(dossier.id) || `dossier ${index + 1}`
   const nom = chaine(dossier.nom) || dossierId
   const groupes = tableau(dossier.groupes).filter(estObjet)
-  // Les voies du dossier : entête (`voies`/`voies_plan`) et voies portées par les groupes.
-  const voies: LibelleVoie[] = [
-    ...libellesDeVoies(dossier.voies ?? dossier.voies_plan),
-    ...groupes.flatMap((g) => libellesDeVoies(g.voie)),
-  ]
-  // Un même nom écrit de deux façons ne compte qu'une fois.
-  const parNoyau = new Map<string, LibelleVoie>()
-  for (const v of voies) if (!parNoyau.has(v.noyau)) parNoyau.set(v.noyau, v)
-  const distinctes = [...parNoyau.values()]
+  const voies = voiesDuDossier(dossier, groupes)
+
+  // Table « référence routière → nom de voie » que le dossier donne lui-même (« Route de X (D54) »).
+  const references = referencesDuDossier(textesDeVoies(dossier, groupes))
+  const resoudre = (l: LibelleVoie): LibelleVoie =>
+    (estReferenceRoutiere(l.noyau) ? references.get(l.noyau) ?? l : l)
+  /**
+   * Deux libellés du carrefour que le dossier lui-même donne pour la même voie — « D 54 » et « Route de
+   * Saint-Bonnet-les-Oules » — ne sont qu'une rue. Les compter deux fois classerait ce carrefour-là devant
+   * celui qui réunit vraiment deux branches du dossier.
+   */
+  const memeRue = (a: LibelleVoie, b: LibelleVoie): boolean =>
+    memeVoie(a, b) || memeVoie(resoudre(a), resoudre(b))
 
   let meilleur: NoeudCandidat | null = null
   let score = 0
-  let voiesReconnues: string[] = []
+  let parGroupe = 0
+  let ruesReconnues: string[] = []
+  let ruesDuCarrefour = 0
   let exAequo: NoeudCandidat[] = []
   for (const noeud of carrefours) {
-    const reconnues: string[] = []
-    for (const v of distinctes) {
-      if (noeud.libelles.some((l) => memeVoie(v, l))) reconnues.push(v.brut)
-    }
-    if (!reconnues.length) continue
-    if (reconnues.length > score) {
-      score = reconnues.length
+    const trouve = ruesRetrouvees(noeud, voies, memeRue)
+    if (!trouve.libelles.length) continue
+    // À nombre égal de rues retrouvées, le carrefour dont les rues portent des groupes de feux du dossier
+    // l'emporte : le dossier signalise ses approches, alors que sa liste de voies reprend aussi des
+    // repères du plan qui ne sont pas des branches du carrefour (« Lotissement les Serins » sur VE004).
+    const rang = trouve.libelles.length - score || trouve.parGroupe - parGroupe
+    if (rang > 0) {
+      score = trouve.libelles.length
+      parGroupe = trouve.parGroupe
       meilleur = noeud
-      voiesReconnues = reconnues
+      ruesReconnues = trouve.libelles
+      ruesDuCarrefour = trouve.ruesDuCarrefour
       exAequo = [noeud]
-    } else if (reconnues.length === score) {
+    } else if (rang === 0) {
       exAequo.push(noeud)
     }
   }
-  return { dossier, dossierId, nom, voies: distinctes, groupes, meilleur, score, voiesReconnues, exAequo }
+  return { dossier, dossierId, nom, voies, groupes, meilleur, score, ruesReconnues, ruesDuCarrefour, exAequo }
 }
 
 export function importDossiersFeux(raw: unknown, opts: DossierImportOptions): DossierImportResult {
@@ -1212,7 +1369,7 @@ function traiterDossier(
     return
   }
   if (!c.meilleur || c.score === 0) {
-    echec('aucune', `aucune des voies du dossier (${c.voies.map((v) => v.brut).slice(0, 3).join(', ')}) ne correspond à un tronçon du réseau`)
+    echec('aucune', `aucune des voies du dossier (${c.voies.map((v) => v.voie.brut).slice(0, 3).join(', ')}) ne correspond à un tronçon du réseau`)
     return
   }
   if (c.exAequo.length > 1) {
@@ -1223,9 +1380,15 @@ function traiterDossier(
 
   const noeud = c.meilleur
   const confiance: DossierMatch['confiance'] = c.score >= 2 ? 'sure' : 'probable'
+  // Le message énumère les rues du NŒUD retenu, et combien y arrivent en tout : c'est le seul moyen pour
+  // l'exploitant de voir qu'un carrefour de deux rues ne peut pas être celui qu'un dossier de quatre
+  // branches décrit. Citer les libellés du dossier laisserait croire que tout a été retrouvé.
+  const total = c.ruesDuCarrefour > 1
+    ? `${c.ruesDuCarrefour} rues qui y arrivent`
+    : `${c.ruesDuCarrefour} rue qui y arrive`
   const raison = c.score >= 2
-    ? `${c.score} voies du dossier retrouvées au carrefour (${c.voiesReconnues.join(', ')})`
-    : `une seule voie du dossier retrouvée au carrefour (${c.voiesReconnues.join(', ')}) : à confirmer`
+    ? `${c.score} voies du dossier retrouvées au carrefour (${c.ruesReconnues.join(', ')}), sur ${total}`
+    : `une seule voie du dossier retrouvée au carrefour (${c.ruesReconnues.join(', ')}), sur ${total} : à confirmer`
 
   // Un carrefour déjà à feux garde son contrôleur (et son regroupement de nœuds) : le dossier le remplace.
   const controleExistant = network.controls[noeud.id]
@@ -1290,11 +1453,7 @@ function construireControleur(
   const nonRattaches: string[] = []
   const voiesDeGroupes = new Map<string, string[]>()
   // Table « référence routière → nom de voie » construite sur le dossier lui-même (§ défaut RD).
-  const references = referencesDuDossier([
-    ...listeDeChaines(c.dossier.voies ?? c.dossier.voies_plan),
-    ...c.groupes.flatMap((g) => listeDeChaines(g.voie)),
-    chaine(c.dossier.nom),
-  ])
+  const references = referencesDuDossier(textesDeVoies(c.dossier, c.groupes))
   /** Références rapprochées d'un nom de voie du dossier, à annoncer : c'est un repli, pas une lecture. */
   const referencesRattachees = new Set<string>()
   /** Groupes dont la voie n'est qu'une référence routière que rien ne permet de nommer. */
@@ -1362,7 +1521,7 @@ function construireControleur(
     }
   }
   if (pietonApproximatif) {
-    avertissements.push('Traversées piétonnes : les mouvements interdits ont été déduits du nom de la voie traversée (entrée ou sortie), le dossier ne donnant pas la géométrie des traversées.')
+    avertissements.push('Traversées piétonnes : les mouvements que chaque traversée franchit ont été déduits du nom de la voie traversée (entrée ou sortie), le dossier ne donnant pas la géométrie des traversées. Une traversée verte ne ferme pas ces mouvements, elle leur retire seulement la protection (§14.5) : un mouvement rattaché à tort perd sa protection sans être fermé.')
   }
   if (referencesRattachees.size) {
     avertissements.push(`Référence(s) routière(s) rapprochée(s) d'un nom de voie d'après les libellés du dossier : ${[...referencesRattachees].join(', ')} ; le réseau ne conservant pas les numéros de route, ce rapprochement est à vérifier.`)
@@ -1408,24 +1567,44 @@ function construireControleur(
       vehiculesDeLaPhase.push(g)
       for (const k of groupe.movements) movements[k] = typeParCle.get(k) ?? 'protected'
     }
-    const ouvertsAvantPietons = Object.keys(movements).length
-    // §14.5 : un vert piéton interdit les mouvements qui franchissent sa traversée, même si un groupe
-    // véhicule les autorise ; sans cela le carrefour rendrait plus de débit qu'en réalité.
+    // §14.5 : une traversée verte en même temps que le groupe véhicule de sa branche ne ferme AUCUN
+    // mouvement, elle les fait passer de « protégé » à « permis » — le conducteur qui tourne a le vert et
+    // cède aux piétons. Rien n'est donc retiré de `movements` ici. Deux raisons : le moteur redérive de
+    // toute façon les verts depuis les groupes (`phaseMovements`), donc le retrait était sans effet sur la
+    // simulation ; et il rendait `phase.movements` — que lisent la carte et le schéma de phase — différent
+    // de ce qui est simulé. Le déclassement en « permis » n'est pas écrit ici non plus : il dépend du cycle,
+    // une traversée sur bouton poussoir laissant le vert protégé les cycles où personne n'appuie (§14.5),
+    // et c'est `phaseMovements` qui l'applique. Les traversées ne servent donc ici qu'à avertir.
+    const franchisParPieton = new Set<MovementKey>()
+    /** Traversées de la phase qui franchissent au moins un mouvement ouvert : les seules à nommer. */
+    const traverseesFranchissantes: string[] = []
     for (const g of retenus) {
       const groupe = parGroupe.get(g)
       if (groupe?.type !== 'pieton') continue
-      for (const k of groupe.movements) delete movements[k]
+      const franchis = groupe.movements.filter((k) => k in movements)
+      if (franchis.length) traverseesFranchissantes.push(g)
+      for (const k of franchis) franchisParPieton.add(k)
     }
-    if (retenus.length && !Object.keys(movements).length) {
-      // Trois causes très différentes se cachaient derrière un message unique : parler de traversées
-      // piétonnes quand le dossier n'en a aucune envoie le technicien sur une fausse piste.
-      if (ouvertsAvantPietons > 0) {
-        avertissements.push(`Phase « ${nom} » : aucun mouvement au vert après prise en compte des traversées piétonnes.`)
-      } else if (vehiculesDeLaPhase.length) {
+    const ouverts = Object.keys(movements).length
+    if (retenus.length && !ouverts) {
+      // Deux causes très différentes : parler de traversées piétonnes quand la phase n'ouvre rien
+      // enverrait le technicien sur une fausse piste, le défaut est ailleurs.
+      if (vehiculesDeLaPhase.length) {
         avertissements.push(`Phase « ${nom} » : aucun mouvement au vert, le(s) groupe(s) véhicule ${vehiculesDeLaPhase.join(', ')} n'étant rattaché(s) à aucune approche du carrefour.`)
       } else {
         avertissements.push(`Phase « ${nom} » : aucun mouvement au vert, la phase ne comporte aucun groupe véhicule.`)
       }
+    } else if (ouverts && franchisParPieton.size === ouverts) {
+      // Ce que l'exploitant ne peut pas deviner du dossier : cette phase n'ouvre plus un seul vert
+      // protégé, tous ses mouvements cèdent aux piétons. Sa capacité simulée est donc majorée, le moteur
+      // ne disposant d'aucune demande piétonne pour calculer les créneaux (§14.5, limite assumée).
+      // Une traversée sur bouton poussoir n'est pas desservie à tous les cycles : le dire évite de faire
+      // chercher un vert protégé que le carrefour donne bel et bien, mais seulement une partie du temps.
+      const surAppel = traverseesFranchissantes.filter((g) => !parGroupe.get(g)?.recall)
+      const reserveAppel = surAppel.length
+        ? ` Sur bouton poussoir (${surAppel.join(', ')}), le vert redevient protégé les cycles où personne n'appuie.`
+        : ''
+      avertissements.push(`Phase « ${nom} » : ses ${ouverts} mouvement(s) au vert sont tous franchis par une traversée piétonne verte de la même phase (${traverseesFranchissantes.join(', ')}). Ils restent au vert mais en cession (vert permis, aucun vert protégé) et leur capacité simulée est optimiste, le dossier ne portant aucune demande piétonne.${reserveAppel}`)
     }
     const phase: SignalPhase = {
       id: idPhase,

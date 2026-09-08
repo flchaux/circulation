@@ -106,6 +106,12 @@ export interface CarrefourCandidat {
   nodeId: NodeId
   /** Rues qui se croisent au carrefour (« Avenue de la Libération / Rue de Jourcey »). */
   etiquette: string
+  /**
+   * Rues du dossier retrouvées à ce carrefour, dans l'écriture du réseau. C'est sur quoi repose la
+   * proposition : sans cette liste, l'exploitant arbitrerait entre des libellés sans savoir ce qui
+   * les rapproche du dossier.
+   */
+  ruesRetrouvees: string[]
 }
 
 /**
