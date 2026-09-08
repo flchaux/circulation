@@ -449,6 +449,21 @@ export function serializeDemandCsv(demand: Demand, network: Network): string
 // src/model/schema.ts                                                              [C]
 export function validateProject(value: unknown): { ok: true; project: Project } | { ok: false; errors: string[] }
 
+// src/model/signals.ts — dossiers de carrefour (voir §14)
+export function phaseMovements(controller: SignalController, phase: SignalPhase): Record<MovementKey, GreenKind>
+
+// src/geo/dossierFeux.ts — import d'un fichier de dossiers de carrefour (voir §14)
+export interface DossierMatch {
+  dossierId: string; nom: string; nodeId: NodeId | null; controllerId: ControllerId | null
+  confiance: 'sure' | 'probable' | 'incertaine' | 'aucune'; raison: string
+  groupesRattaches: number; groupesNonRattaches: string[]; avertissements: string[]
+}
+export interface DossierImportResult {
+  controllers: Record<ControllerId, SignalController>; controls: Record<NodeId, NodeControl>
+  matches: DossierMatch[]; avertissements: string[]
+}
+export function importDossiersFeux(raw: unknown, opts: { network: Network }): DossierImportResult
+
 // src/ui/map/colors.ts                                                             [D]
 export interface ColorScale { color(value: number): string; stops: { value: number; color: string }[]; label: string; unit: string }
 export function scaleFor(mode: ColorMode, results: SimResults | null, reference: SimResults | null): ColorScale
@@ -515,7 +530,7 @@ Points tranchés pendant la réalisation, au-delà de la spécification ci-dessu
 | Vérification | Commande | État au 4 septembre 2026 |
 |---|---|---|
 | Types | `npm run typecheck` | 0 erreur |
-| Tests unitaires | `npm test` | 222 tests, 19 fichiers |
+| Tests unitaires | `npm test` | 370 tests, 26 fichiers |
 | Build de production | `npm run build` | réussi |
 | Parcours navigateur | `npm run e2e` | 7 parcours, en local comme sur le site déployé |
 
@@ -590,3 +605,89 @@ désormais aux véhicules **entrés** sur le tronçon et non à ceux qui en sont
 compte pour la même raison les véhicules entrés, faute de quoi une approche bloquée pèserait zéro dans le
 retard moyen de son carrefour.
 
+
+## 14. Dossiers de carrefour réels
+
+Les communes disposent, pour chaque carrefour à feux, d'un « dossier de carrefour » qui décrit les groupes de
+signaux, les phases, les plans horaires et les temps de sécurité. Un format JSON documenté rassemble ces
+dossiers pour Veauche. Le simulateur sait désormais en représenter et en exploiter la partie qui gouverne la
+circulation.
+
+### 14.1 Ce qui est repris et pourquoi
+
+| Donnée du dossier | Dans le simulateur | Effet sur la circulation |
+|---|---|---|
+| Groupes `Vn` / `Pn` | `SignalGroup` | Unité commune aux phases, aux inter-verts et aux piétons |
+| Phases (groupes verts, mini, maxi) | `SignalPhase` + `SignalPlan` | Capacité de chaque approche |
+| Plans de feux et calendrier | `SignalPlan`, `PlanSchedule` | Comparer pointe du matin et heure creuse |
+| Matrice d'inter-verts | `InterGreenMatrix`, `amberByGroup` | Temps perdu réel entre deux phases |
+| Groupes piétons | `SignalGroup` de type `pieton` | Vert piéton qui interdit les mouvements sécants |
+| Vert de rappel piéton | `SignalGroup.recall` | Vert à chaque cycle, contre une partie des cycles sur appel |
+| Phase propre à un plan | `PlanPhaseTiming.skipped` | Cycle plus court dans les plans qui ne l'ouvrent pas |
+
+### 14.2 Ce qui n'est pas repris, et pourquoi
+
+Une grande partie du dossier décrit le matériel et l'exploitation, sans effet sur l'écoulement du trafic :
+inventaire de l'armoire et de la voirie, raccordement et affectation des cartes, alimentation électrique et
+consommation, dispositifs sonores pour malvoyants, contrôles réglementaires, historique des révisions,
+identité du contrôleur. Ces données appartiennent à la gestion de patrimoine, pas à un simulateur ; les
+reprendre alourdirait le format de projet sans changer un seul résultat.
+
+Deux limites tiennent aux données elles-mêmes plutôt qu'à un choix : les diagrammes linéaires (l'ouverture
+seconde par seconde de chaque groupe) ne figurent pas dans le JSON, et sur les dossiers de 2007 les noms de
+voies rattachés aux groupes sont une reconstitution signalée par `source_voie`, à confirmer avant tout usage.
+
+### 14.3 Inter-verts
+
+Quand un contrôleur porte une matrice, la durée séparant deux phases n'est plus une constante mais dépend des
+groupes concernés : pour la transition de la phase *i* à la phase *j*, on retient le maximum de
+`interGreen[g][h]` sur les groupes `g` qui perdent le vert et `h` qui le prennent. La part de jaune vient de
+`amberByGroup` du groupe véhicule qui perd le vert (un groupe piéton n'a pas de jaune), le reste est du rouge
+intégral. Sans matrice, `amber` et `allRed` du contrôleur ou de la phase s'appliquent comme auparavant.
+
+### 14.4 Plans horaires
+
+`SimSettings.startTimeOfDayMin` et `dayOfWeek` donnent l'heure simulée à l'instant 0. À chaque cycle, le
+contrôleur sélectionne le plan dont la plage horaire couvre l'heure courante ; le changement de plan
+n'intervient qu'en fin de cycle, jamais au milieu d'une phase. Sans `schedule`, le premier plan s'applique en
+permanence ; sans `plans`, les durées portées par les phases font foi.
+
+### 14.4 bis Conventions et décisions de modélisation
+
+Ces points ne sont dictés ni par le format ni par le document d'origine : ils sont tranchés ici.
+
+- **Phase propre à un plan.** Une phase déclarée par le dossier comme appartenant à un seul plan est
+  *fermée* dans les autres (`PlanPhaseTiming.skipped`). Elle n'y consomme ni vert ni inter-vert, et le
+  contrôleur enchaîne directement sur la phase ouverte suivante. Sans cela, une sous-phase de pointe
+  tournerait aussi en heure creuse et allongerait le cycle d'une phase que le dossier n'y ouvre pas.
+  Un plan qui fermerait toutes ses phases est ignoré, pour ne pas laisser le carrefour au rouge.
+- **Plage horaire de nuit.** Une plage qui franchit minuit appartient au jour de son début : « 22 h - 6 h
+  du lundi au vendredi » couvre le samedi 1 h (suite de la nuit du vendredi) et pas le lundi 1 h.
+- **Bascule de plan.** Le nouveau plan prend effet à la frontière de cycle et son décalage ne recale pas le
+  cycle en cours : un contrôleur réel ne peut pas écourter une phase pour se réaligner. Une onde verte peut
+  donc se décaler après une bascule, jusqu'au prochain calage.
+- **Part de vert et saturation.** Le dénominateur de la saturation (§5.7) est la moyenne de la part de vert
+  *pondérée par la durée d'application de chaque plan* sur la fenêtre mesurée, et non la part du plan en
+  vigueur au démarrage.
+- **Jaune de repli.** Quand une matrice existe sans colonne « jaune » exploitable, le jaune retombe sur
+  `controller.amber`, plafonné à l'inter-vert ; sans ce repli l'inter-vert entier deviendrait du rouge
+  intégral. Le jaune retenu ne considère que les groupes véhicules ayant effectivement une case vers un
+  groupe qui prend le vert.
+- **Dégagement d'une sous-phase piétonne.** Quand une traversée s'éteint alors que le groupe véhicule qui
+  la portait reste vert, son rouge de dégagement s'applique quand même aux mouvements qui rouvrent. Sans
+  cela le motif courant « phase B = V3 + P2 puis phase C = V3 » rouvrirait la traversée à la seconde
+  suivante, sans aucun temps de dégagement.
+
+### 14.5 Groupes piétons
+
+Un groupe piéton au vert interdit les mouvements véhicules qui franchissent sa traversée : ceux-ci sont rouges
+pendant la phase même si un groupe véhicule les autorise. C'est ainsi que le temps piéton consomme de la
+capacité, ce qu'un plan importé doit refléter sous peine de surestimer le débit du carrefour.
+
+**Rappel et appel.** Une traversée en rappel (`SignalGroup.recall`) est desservie à chaque cycle. Une
+traversée sur bouton poussoir ne l'est qu'une partie des cycles : faute de donnée de demande piétonne dans
+les dossiers, le moteur tire à chaque cycle un Bernoulli de paramètre `DEFAULT_PEDESTRIAN_CALL_SHARE` (0,5
+par défaut, soit une trentaine de piétons par heure pour un cycle de 80 s sous hypothèse d'arrivées de
+Poisson). Le tirage est une fonction pure de la graine, du contrôleur, du groupe et du numéro de cycle,
+donc reproductible. Les durées ne dépendent jamais du tirage : un dégagement n'est jamais raccourci et le
+temps de cycle reste constant, ce qui est le choix sûr.

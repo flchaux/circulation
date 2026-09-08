@@ -30,10 +30,14 @@ npm run extract-city -- 42323 veauche   # pré-extraire une commune dans public/
    la vitesse, le nombre de voies, fermez un tronçon, changez le type de carrefour, interdisez des mouvements.
 3. **Feux** : réglez les phases mouvement par mouvement, les durées de vert, l'orange, le rouge intégral, le décalage
    entre carrefours pour créer une onde verte, ou passez un carrefour en mode adaptatif.
-4. **Trafic** : réglez les débits entrants, la matrice origine-destination, le trafic interne, ou importez un CSV
+4. **Feux, données réelles** : si votre commune vous a fourni ses dossiers de carrefour au format JSON
+   documenté, importez-les depuis l'onglet Feux. L'application en reprend les groupes, les phases, les plans
+   horaires, les matrices d'inter-verts et les traversées piétonnes, rattache chaque dossier au carrefour
+   correspondant du réseau, et vous dit ce qu'elle n'a pas su rattacher plutôt que de le deviner.
+5. **Trafic** : réglez les débits entrants, la matrice origine-destination, le trafic interne, ou importez un CSV
    de comptages. Lancez la simulation depuis la barre supérieure.
-5. **Résultats** : débit, retard, vitesse, files et saturation par tronçon, par sortie et par carrefour.
-6. **Comparer** : figez un scénario de référence, modifiez la signalisation, relancez, et lisez les écarts.
+6. **Résultats** : débit, retard, vitesse, files et saturation par tronçon, par sortie et par carrefour.
+7. **Comparer** : figez un scénario de référence, modifiez la signalisation, relancez, et lisez les écarts.
 
 Vos modifications sont enregistrées automatiquement dans le navigateur. Le bouton d'export produit un fichier JSON
 autonome qui contient le réseau, les feux, la demande et les résultats : il se recharge à l'identique.

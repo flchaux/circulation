@@ -81,7 +81,12 @@ export class StatsCollector {
   private tripTimeSum = 0
   private vehMeters = 0
 
+  /* --- part de vert (dénominateur de la saturation) --- */
   private greenShare: Float64Array
+  /** ∫ part de vert dt sur la fenêtre mesurée ; `null` tant que la part n'a jamais changé. */
+  private shareIntegral: Float64Array | null = null
+  /** Instant jusqu'auquel `shareIntegral` est à jour. */
+  private shareSince = 0
 
   private readonly junctions: Junction[]
 
@@ -123,8 +128,39 @@ export class StatsCollector {
     this.junctions = collectJunctions(graph, network)
   }
 
-  setGreenShare(share: Float64Array): void {
+  /**
+   * Nouvelle part de vert par tronçon, en vigueur à partir de `t`.
+   *
+   * Un contrôleur à plans horaires n'a pas la même part de vert le matin et à l'heure creuse : prendre celle
+   * du démarrage ferait dépendre la saturation de l'heure de départ de la simulation, alors que la fenêtre
+   * mesurée est la même. La part retenue au bilan est donc la **moyenne pondérée par la durée d'application
+   * de chaque plan sur la fenêtre mesurée** : c'est le seul dénominateur qui corresponde au débit mesuré,
+   * lui aussi cumulé sur toute la fenêtre. Une simple réévaluation à la bascule laisserait le dernier plan
+   * répondre pour toute la fenêtre, ce qui serait faux dès qu'elle en couvre deux.
+   *
+   * Tant que la part ne change pas (contrôleur sans plan horaire), le tableau reçu est utilisé tel quel :
+   * aucun calcul ne s'interpose, le résultat est identique au bit près.
+   */
+  setGreenShare(share: Float64Array, t = this.shareSince): void {
+    if (sameShare(this.greenShare, share)) {
+      this.greenShare = share
+      return
+    }
+    this.integrateShare(t)
     this.greenShare = share
+  }
+
+  /** Cumule la part de vert en vigueur jusqu'à `t`, en ne comptant que la fenêtre mesurée (hors chauffe). */
+  private integrateShare(t: number): void {
+    const acc = this.shareIntegral ?? (this.shareIntegral = new Float64Array(this.g.edgeIds.length))
+    const span = this.clampMeasured(t) - this.clampMeasured(this.shareSince)
+    if (span > 0) for (let e = 0; e < acc.length; e++) acc[e] += this.greenShare[e] * span
+    if (t > this.shareSince) this.shareSince = t
+  }
+
+  /** Instant ramené à la fenêtre mesurée [chauffe, chauffe + durée]. */
+  private clampMeasured(t: number): number {
+    return Math.min(Math.max(t, this.warmupS), this.warmupS + this.durationS)
   }
 
   /** Un véhicule vient d'entrer sur un tronçon (injection ou franchissement). */
@@ -237,20 +273,33 @@ export class StatsCollector {
     this.intervalsClosed++
   }
 
+  /**
+   * Part de vert retenue au bilan : celle en vigueur si elle n'a jamais changé, sinon sa moyenne pondérée
+   * par la durée d'application de chaque plan sur la fenêtre mesurée.
+   */
+  private meanGreenShare(reachedS: number, measured: number): Float64Array {
+    if (!this.shareIntegral) return this.greenShare
+    this.integrateShare(reachedS)
+    const acc = this.shareIntegral
+    const out = new Float64Array(acc.length)
+    for (let e = 0; e < acc.length; e++) out[e] = acc[e] / measured
+    return out
+  }
+
   build(ctx: StatsContext): SimResults {
     const g = this.g
     const measured = Math.max(1e-9, Math.min(ctx.reachedS, this.warmupS + this.durationS) - this.warmupS)
     const hours = measured / 3600
     const satFlow = this.settings.saturationFlow
 
+    const share = this.meanGreenShare(ctx.reachedS, measured)
     const edges: Record<EdgeId, EdgeStats> = {}
     for (let e = 0; e < g.edgeIds.length; e++) {
       const ex = this.exited[e]
       const en = this.entered[e]
       const meanTravel = ex > 0 ? this.travelSum[e] / ex : g.freeTime[e]
       const flow = hours > 0 ? ex / hours : 0
-      const share = Math.max(0.01, this.greenShare[e])
-      const capacity = satFlow * g.lanes[e] * share
+      const capacity = satFlow * g.lanes[e] * Math.max(0.01, share[e])
       edges[g.edgeIds[e]] = {
         entered: this.entered[e],
         exited: ex,
@@ -334,6 +383,14 @@ export class StatsCollector {
       warnings: ctx.warnings.slice(),
     }
   }
+}
+
+/** Deux parts de vert identiques valeur par valeur : rien à intégrer, l'ancienne table reste valable. */
+function sameShare(a: Float64Array, b: Float64Array): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
 }
 
 /**

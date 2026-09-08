@@ -11,13 +11,15 @@
  */
 import type {
   ChangeLogEntry, CommuneInfo, ControlType, ControllerId, Demand, EdgeId, EntryConfig, ExitConfig, GeoMultiPolygon,
-  GeoPolygon, GreenKind, HighwayClass, MovementKey, NetEdge, NetNode, Network, NodeControl, NodeId, Project,
-  ProjectMeta, ReferenceSnapshot, SignalController, SignalMode, SignalPhase, SimResults, SimSettings,
+  GeoPolygon, GreenKind, HighwayClass, InterGreenMatrix, MovementKey, NetEdge, NetNode, Network, NodeControl, NodeId,
+  PlanPhaseTiming, PlanSchedule, Project, ProjectMeta, ReferenceSnapshot, SignalController, SignalGroup, SignalMode,
+  SignalPhase, SignalPlan, SimResults, SimSettings,
 } from './types'
-import { HIGHWAY_CLASSES, PROJECT_FORMAT, PROJECT_VERSION } from './types'
+import { HIGHWAY_CLASSES, PROJECT_FORMAT, PROJECT_VERSION, parseMovementKey } from './types'
 import type { ImportStats } from '@/geo/types'
 import { ATTRIBUTION, DEFAULT_SETTINGS } from './defaults'
 import { polylineLength } from './geometry'
+import { MINUTES_PER_DAY } from './signals'
 
 /* ------------------------------------------------------------------ */
 /*  Collecte des erreurs                                               */
@@ -226,12 +228,167 @@ function validatePhase(raw: unknown, index: number, errors: ErrorList, path: str
   }
   if (typeof r.amber === 'number' && Number.isFinite(r.amber) && r.amber >= 0) phase.amber = r.amber
   if (typeof r.allRed === 'number' && Number.isFinite(r.allRed) && r.allRed >= 0) phase.allRed = r.allRed
+  // Groupes au vert (plans importés d'un dossier). Un identifiant inconnu du contrôleur n'est pas écarté ici :
+  // `validateController` (model/signals.ts) le signale comme anomalie, ce qui vaut mieux qu'une disparition muette.
+  const groups = uniqueStrings(r.groups)
+  if (groups.length) phase.groups = groups
   return phase
+}
+
+/* ---------------- Dossiers de carrefour (§14) ---------------- */
+
+/** Chaînes non vides, dédoublonnées dans l'ordre de lecture ; tableau vide si le champ n'en est pas un. */
+function uniqueStrings(raw: unknown): string[] {
+  return [...new Set(strArray(raw).filter((s) => s.length > 0))]
+}
+
+/** Nombre fini ≥ 0, sinon `null` : les temps de sécurité et les durées de plan n'ont pas de repli sensé. */
+function positive(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
+}
+
+/**
+ * Groupes de signaux d'un dossier de carrefour. Un mouvement dont l'un des tronçons a disparu est retiré,
+ * comme le sont les interdictions de tourner : il ne désigne plus rien.
+ */
+function validateGroups(raw: unknown, edges: Record<EdgeId, NetEdge>): SignalGroup[] {
+  if (!Array.isArray(raw)) return []
+  const groups: SignalGroup[] = []
+  const seen = new Set<string>()
+  for (const value of raw) {
+    const r = rec(value)
+    if (!r) continue
+    const id = optStr(r.id)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const group: SignalGroup = {
+      id,
+      // Un dossier nomme ses groupes `V1`/`P2` : à défaut de type lisible, l'initiale fait foi.
+      type: oneOf(r.type, ['vehicule', 'pieton'] as const, /^p/i.test(id) ? 'pieton' : 'vehicule'),
+      movements: uniqueStrings(r.movements).filter((key) => {
+        const { from, to } = parseMovementKey(key)
+        return !!edges[from] && !!edges[to]
+      }),
+    }
+    const label = optStr(r.label)
+    if (label) group.label = label
+    if (r.recall === true) group.recall = true
+    groups.push(group)
+  }
+  return groups
+}
+
+/**
+ * Matrice d'inter-verts : seules les cases numériques positives sont conservées, et seulement entre groupes
+ * connus — une ligne orpheline ne pourrait jamais être lue par `phaseTransition`.
+ */
+function validateInterGreen(raw: unknown, groups: SignalGroup[]): InterGreenMatrix {
+  const src = rec(raw)
+  if (!src) return {}
+  const known = new Set(groups.map((g) => g.id))
+  const matrix: InterGreenMatrix = {}
+  for (const [from, row] of Object.entries(src)) {
+    if (known.size && !known.has(from)) continue
+    const cells = rec(row)
+    if (!cells) continue
+    const clean: Record<string, number> = {}
+    for (const [to, value] of Object.entries(cells)) {
+      if (known.size && !known.has(to)) continue
+      const v = positive(value)
+      if (v !== null) clean[to] = v
+    }
+    if (Object.keys(clean).length) matrix[from] = clean
+  }
+  return matrix
+}
+
+function validateAmberByGroup(raw: unknown, groups: SignalGroup[]): Record<string, number> {
+  const src = rec(raw)
+  if (!src) return {}
+  const known = new Set(groups.map((g) => g.id))
+  const out: Record<string, number> = {}
+  for (const [id, value] of Object.entries(src)) {
+    if (known.size && !known.has(id)) continue
+    const v = positive(value)
+    if (v !== null) out[id] = v
+  }
+  return out
+}
+
+/**
+ * Plans de feux. Les durées absentes ou négatives sont laissées de côté : la phase garde alors les siennes
+ * (`planPhaseTiming`), ce qui est préférable à une durée inventée. Une phase citée mais inconnue du
+ * contrôleur est conservée et signalée par `validateController`.
+ */
+function validatePlans(raw: unknown): SignalPlan[] {
+  if (!Array.isArray(raw)) return []
+  const plans: SignalPlan[] = []
+  const seen = new Set<string>()
+  for (const value of raw) {
+    const r = rec(value)
+    if (!r) continue
+    const id = optStr(r.id) ?? `plan${plans.length + 1}`
+    if (seen.has(id)) continue
+    seen.add(id)
+    const phases: Record<string, PlanPhaseTiming> = {}
+    for (const [phaseId, timing] of Object.entries(rec(r.phases) ?? {})) {
+      const t = rec(timing)
+      if (!t) continue
+      const skipped = t.skipped === true
+      const green = positive(t.green)
+      // Sans durée de vert lisible, l'entrée est retirée plutôt que ramenée à zéro : la phase garde alors
+      // ses propres durées, ce qui vaut mieux qu'un vert nul imposé par un plan mal saisi. Une phase
+      // explicitement fermée dans ce plan fait exception : elle n'a pas besoin de durée de vert.
+      if (green === null && !skipped) continue
+      const entry: PlanPhaseTiming = { green: green ?? 0 }
+      const minGreen = positive(t.minGreen)
+      const maxGreen = positive(t.maxGreen)
+      if (minGreen !== null) entry.minGreen = minGreen
+      if (maxGreen !== null) entry.maxGreen = maxGreen
+      if (skipped) entry.skipped = true
+      phases[phaseId] = entry
+    }
+    const plan: SignalPlan = {
+      id,
+      name: str(r.name, `Plan ${plans.length + 1}`),
+      cycle: numMin(r.cycle, 0, 0),
+      offset: numMin(r.offset, 0, 0),
+      phases,
+    }
+    const period = optStr(r.period)
+    if (period) plan.period = period
+    plans.push(plan)
+  }
+  return plans
+}
+
+/** Plages horaires : bornes en minutes depuis minuit (0 à 1440), jours 1 (lundi) à 7 (dimanche). */
+function validateSchedule(raw: unknown): PlanSchedule[] {
+  if (!Array.isArray(raw)) return []
+  const out: PlanSchedule[] = []
+  for (const value of raw) {
+    const r = rec(value)
+    if (!r) continue
+    const planId = optStr(r.planId)
+    const fromMin = positive(r.fromMin)
+    const toMin = positive(r.toMin)
+    if (!planId || fromMin === null || toMin === null) continue
+    const days = [...new Set(numArray(r.days).map((d) => Math.round(d)).filter((d) => d >= 1 && d <= 7))]
+      .sort((a, b) => a - b)
+    out.push({
+      planId,
+      fromMin: Math.min(MINUTES_PER_DAY, fromMin),
+      toMin: Math.min(MINUTES_PER_DAY, toMin),
+      days,
+    })
+  }
+  return out
 }
 
 function validateControllers(
   raw: unknown,
   nodes: Record<NodeId, NetNode>,
+  edges: Record<EdgeId, NetEdge>,
   errors: ErrorList,
   path: string,
 ): Record<ControllerId, SignalController> {
@@ -248,7 +405,7 @@ function validateControllers(
     const phases = (Array.isArray(r.phases) ? r.phases : [])
       .map((p, i) => validatePhase(p, i, errors, `${path}["${id}"].phases[${i}]`))
     const actuated = rec(r.actuated)
-    controllers[id] = {
+    const controller: SignalController = {
       id,
       name: str(r.name, 'Carrefour à feux'),
       nodeIds,
@@ -259,6 +416,21 @@ function validateControllers(
       phases,
       actuated: { skipEmpty: bool(actuated?.skipEmpty, true) },
     }
+    // Champs des dossiers de carrefour : tous facultatifs et tous omis s'ils sont vides, afin qu'un projet
+    // antérieur ressorte octet pour octet identique à ce qu'il était.
+    const groups = validateGroups(r.groups, edges)
+    if (groups.length) controller.groups = groups
+    const interGreen = validateInterGreen(r.interGreen, groups)
+    if (Object.keys(interGreen).length) controller.interGreen = interGreen
+    const amberByGroup = validateAmberByGroup(r.amberByGroup, groups)
+    if (Object.keys(amberByGroup).length) controller.amberByGroup = amberByGroup
+    const plans = validatePlans(r.plans)
+    if (plans.length) controller.plans = plans
+    const schedule = validateSchedule(r.schedule)
+    if (schedule.length) controller.schedule = schedule
+    const source = optStr(r.source)
+    if (source) controller.source = source
+    controllers[id] = controller
   }
   return controllers
 }
@@ -309,7 +481,7 @@ function validateNetwork(raw: unknown, errors: ErrorList, path: string): Network
   }
   const nodes = validateNodes(src.nodes, errors, `${path}.nodes`)
   const edges = validateEdges(src.edges, nodes, errors, `${path}.edges`)
-  const controllers = validateControllers(src.controllers, nodes, errors, `${path}.controllers`)
+  const controllers = validateControllers(src.controllers, nodes, edges, errors, `${path}.controllers`)
   const controls = validateControls(src.controls, nodes, edges, controllers, errors, `${path}.controls`)
   return { nodes, edges, controls, controllers }
 }
@@ -388,6 +560,9 @@ function validateSettings(raw: unknown): SimSettings {
   return {
     durationMin: numMin(r.durationMin, D.durationMin, 1),
     warmupMin: numMin(r.warmupMin, D.warmupMin, 0),
+    // Réglages apparus avec les plans de feux horaires : absents des projets antérieurs.
+    startTimeOfDayMin: Math.min(1439, Math.max(0, num(r.startTimeOfDayMin, D.startTimeOfDayMin))),
+    dayOfWeek: Math.min(7, Math.max(1, Math.round(num(r.dayOfWeek, D.dayOfWeek)))),
     dt: 1, // le moteur travaille au pas de 1 s (contrat du modèle)
     dynamicRouting: bool(r.dynamicRouting, D.dynamicRouting),
     routingIntervalMin: numMin(r.routingIntervalMin, D.routingIntervalMin, 0.1),
@@ -587,7 +762,14 @@ function validateReference(raw: unknown, errors: ErrorList, path: string): Refer
  * Migrations d'une version vers la suivante. La version 1 est le premier format publié : la table est vide
  * aujourd'hui, mais tout ajout d'une version 2 devra y déclarer `1: (raw) => …`.
  */
-const MIGRATIONS: Record<number, (raw: Record<string, unknown>) => Record<string, unknown>> = {}
+const MIGRATIONS: Record<number, (raw: Record<string, unknown>) => Record<string, unknown>> = {
+  /**
+   * Version 1 vers 2 : les champs ajoutés (groupes, inter-verts, plans horaires, heure simulée) sont tous
+   * facultatifs et la validation les complète déjà par leurs valeurs par défaut. Aucune transformation
+   * n'est donc nécessaire, mais l'étape doit exister pour qu'un fichier version 1 soit accepté.
+   */
+  1: (raw) => raw,
+}
 
 /* ------------------------------------------------------------------ */
 /*  Entrée publique                                                    */

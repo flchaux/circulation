@@ -16,7 +16,7 @@ import { generateArrivals } from './demand'
 import type { EngineGraph, RouteResult } from './routing'
 import { Router, buildGraph } from './routing'
 import { SIG_AMBER, SIG_FREE, SIG_GREEN_PERMITTED, SIG_GREEN_PROTECTED, SIG_RED, SignalEngine } from './signals'
-import type { SignalProbe } from './signals'
+import type { SignalClock, SignalProbe } from './signals'
 import type { PriorityTables } from './priority'
 import { buildPriorityTables, yieldCapacity } from './priority'
 import { StatsCollector } from './stats'
@@ -120,6 +120,10 @@ export class Simulation {
   private dischargeList!: Int32Array
   private shuffleRng: () => number = () => 0
   private readonly probe: SignalProbe
+  /** Heure simulée et réglages du moteur de feux (graine des appels piétons comprise). */
+  private readonly signalClock: SignalClock
+  /** Dernière bascule de plan horaire prise en compte dans la part de vert des statistiques. */
+  private planEpoch = 0
 
   constructor(init: EngineInit) {
     this.net = init.network
@@ -132,9 +136,19 @@ export class Simulation {
     this.graph = buildGraph(this.net)
     this.edgeIndex = this.graph.edgeIds
     this.router = new Router(this.graph)
-    this.signals = new SignalEngine(this.graph, this.net)
+    this.signalClock = {
+      startTimeOfDayMin: this.settings.startTimeOfDayMin,
+      dayOfWeek: this.settings.dayOfWeek,
+      // Les appels piétons sont tirés au sort : ils suivent la graine de la simulation, comme le reste.
+      seed: this.demand.seed,
+      // Part des cycles où une traversée sur bouton poussoir est appelée. `SimSettings` ne porte pas encore
+      // ce réglage : tant qu'il est absent, l'hypothèse par défaut du modèle s'applique.
+      pedestrianCallShare: (this.settings as SimSettings & { pedestrianCallShare?: number }).pedestrianCallShare,
+    }
+    this.signals = new SignalEngine(this.graph, this.net, this.signalClock)
     this.prio = buildPriorityTables(this.graph, this.net, this.settings, this.signals.signalizedNodes)
     this.stats = new StatsCollector(this.graph, this.net, this.settings, this.signals.greenShareByEdge())
+    this.planEpoch = this.signals.planEpoch
     this.probe = {
       lastActivity: (e: number) => this.lastActivity[e],
       queueLength: (e: number) => this.arrived[e],
@@ -217,6 +231,7 @@ export class Simulation {
     this.signals.reset()
     this.router = new Router(this.graph)
     this.stats = new StatsCollector(this.graph, this.net, this.settings, this.signals.greenShareByEdge())
+    this.planEpoch = this.signals.planEpoch
     this.arrivals = generateArrivals(this.net, this.demand, this.settings)
     if (this.arrivals.length === 0) this.pushWarningOnce('Aucun véhicule à injecter : vérifiez les débits d’entrée.')
     this.prepare(0)
@@ -262,6 +277,12 @@ export class Simulation {
     this.prepared = t
     this.advanceHeads(t)
     this.signals.update(t, this.probe)
+    // Une bascule de plan horaire change les durées de vert, donc la capacité des approches : le
+    // dénominateur de la saturation suit le plan appliqué et non celui du démarrage (§14.4).
+    if (this.signals.planEpoch !== this.planEpoch) {
+      this.planEpoch = this.signals.planEpoch
+      this.stats.setGreenShare(this.signals.greenShareByEdge(), t)
+    }
   }
 
   /** Fait entrer en tête de file les véhicules ayant atteint le bout de leur tronçon, et compacte la liste active. */
@@ -757,10 +778,11 @@ export class Simulation {
     this.net = { ...this.net, controllers, controls }
     this.graph.network = this.net
     const previous = this.signals
-    this.signals = new SignalEngine(this.graph, this.net)
+    this.signals = new SignalEngine(this.graph, this.net, this.signalClock)
     this.signals.adoptStateFrom(previous)
     this.prio = buildPriorityTables(this.graph, this.net, this.settings, this.signals.signalizedNodes)
-    this.stats.setGreenShare(this.signals.greenShareByEdge())
+    this.stats.setGreenShare(this.signals.greenShareByEdge(), this.t)
+    this.planEpoch = this.signals.planEpoch
     this.budgetM.fill(0)
     this.budgetMStep.fill(-2)
     this.prepared = -1

@@ -37,6 +37,11 @@ export interface UiState {
   toolNodes: NodeId[]
   /** Options du prochain tronçon créé avec l'outil `addEdge` (modifiées via `setUi`). */
   addEdgeOptions: { twoWay: boolean; highway: HighwayClass; lanes: number; maxspeed: number }
+  /**
+   * Plan de feux imposé par contrôleur (`setActivePlan`) : réglage d'affichage et d'étude, hors du projet.
+   * Un contrôleur absent suit son calendrier horaire (`schedule`) comme dans la réalité.
+   */
+  planApercu: Record<ControllerId, string>
   /** Sélection à recentrer sur la carte (incrémenté par `select(…, { reveal: true })`). */
   revealCounter: number
 }
@@ -81,10 +86,20 @@ export interface CsvImportReport {
   unknown: string[]
 }
 
+/** Bilan d'un import de dossiers de carrefour (docs/ARCHITECTURE.md §14). */
+export interface DossierImportReport {
+  /** Dossiers rattachés à un carrefour du réseau. */
+  matches: number
+  /** Dossiers lus mais laissés de côté, faute de carrefour reconnu de façon certaine. */
+  nonRattaches: number
+  /** Compte rendu en français : raison de chaque rattachement manqué, réserves sur les données reprises. */
+  avertissements: string[]
+}
+
 /**
  * Invariants du store :
- *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover` et `ui.toolNodes` sont purgés
- *    des identifiants qui n'existent plus ; l'historique est vidé au chargement d'un projet ;
+ *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover`, `ui.toolNodes` et
+ *    `ui.planApercu` sont purgés des identifiants qui n'existent plus ; l'historique est vidé au chargement d'un projet ;
  *  - `sim.frame` et `sim.results` (messages `frame`/`stats`) sont écrits hors immer et ne déclenchent ni `dirty` ni autosauvegarde ;
  *    `project.lastResults` n'est écrit qu'à `done` ;
  *  - toute modification de topologie appelle `reconcileDemand` puis `sanitizeNetwork` et marque `sim.stale`.
@@ -159,6 +174,16 @@ export interface AppState {
   setControllerNodes(controllerId: ControllerId, nodeIds: NodeId[]): void
   /** Calcule les décalages des contrôleurs le long du plus court chemin entre deux nœuds (onde verte). */
   applyGreenWave(fromNode: NodeId, toNode: NodeId): { controllers: number; path: NodeId[] }
+  /**
+   * Import d'un fichier de dossiers de carrefour (§14) : les contrôleurs et les régulations reconnus
+   * remplacent ceux du réseau, dossier par dossier. Annulable ; renvoie le bilan à afficher.
+   */
+  importDossiersFeux(text: string): DossierImportReport
+  /**
+   * Impose un plan de feux à un contrôleur, pour l'affichage **et** pour la simulation ; `null` rend la
+   * main au calendrier horaire. Réglage d'étude : il vit dans `ui.planApercu`, jamais dans le projet.
+   */
+  setActivePlan(controllerId: ControllerId, planId: string | null): void
 
   /* --------- Demande (annulable) --------- */
   updateEntry(nodeId: NodeId, patch: Partial<EntryConfig>): void

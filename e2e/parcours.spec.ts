@@ -313,7 +313,8 @@ test('la configuration se télécharge en JSON complet', async ({ page }) => {
   const projet = JSON.parse(brut)
 
   expect(projet.format).toBe('circulation-project')
-  expect(projet.version).toBe(1)
+  // Version 2 depuis l'arrivée des dossiers de carrefour ; un fichier version 1 reste relisible.
+  expect(projet.version).toBe(2)
   expect(Object.keys(projet.network.edges).length).toBeGreaterThan(500)
   expect(Object.keys(projet.demand.entries).length).toBeGreaterThan(0)
   expect(projet.meta.commune.nom).toMatch(/Veauche/i)

@@ -74,6 +74,9 @@ export const DEFAULT_SETTINGS: SimSettings = {
   followUpTime: 3,
   stopDelay: 2,
   statsIntervalMin: 5,
+  // 8 h du matin un mardi : plage de pointe pour les carrefours à plans horaires.
+  startTimeOfDayMin: 8 * 60,
+  dayOfWeek: 2,
 }
 
 /** Plan de feux par défaut généré sur un carrefour converti en feux. */

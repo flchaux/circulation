@@ -1015,6 +1015,11 @@ input[type='checkbox'] {
   cursor: pointer;
 }
 
+/* Phase écrite en groupes (dossier de carrefour) : le schéma se lit, il ne se modifie pas. */
+.carrefour .mouvement.fige {
+  cursor: default;
+}
+
 /* Zone de clic élargie, invisible, sous chaque flèche. */
 .carrefour .cible {
   fill: none;
@@ -1115,6 +1120,46 @@ input[type='checkbox'] {
   text-align: right;
   color: var(--texte-doux);
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Groupes de signaux d'un dossier de carrefour. Un groupe piéton se distingue à l'œil parce qu'il ne se lit
+ * pas comme les autres : son vert *interdit* les mouvements véhicules qui franchissent sa traversée.
+ */
+.list.groupes .groupe {
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--bordure);
+  border-left: 3px solid var(--vert-feu);
+  border-radius: var(--rayon);
+  background: var(--surface);
+}
+
+.list.groupes .groupe.pieton {
+  border-left-color: var(--accent);
+  background: var(--accent-doux);
+}
+
+.groupe-id {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.groupe-type {
+  color: var(--texte-doux);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Matrice d'inter-verts : lecture seule, une case vide signale deux groupes compatibles. */
+.data-table.intervert th,
+.data-table.intervert td {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table.intervert th.pieton {
+  color: var(--accent);
 }
 
 /* ------------------------------------------------------------------ */

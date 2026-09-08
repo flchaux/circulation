@@ -69,6 +69,13 @@ export function formatDuration(seconds: number): string {
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')}`
 }
 
+/** Heure du jour (minutes depuis minuit) : « 8 h 05 ». Une valeur hors de la journée est ramenée dans 0–24 h. */
+export function formatTimeOfDay(minOfDay: number): string {
+  if (!Number.isFinite(minOfDay)) return '—'
+  const total = ((Math.round(minOfDay) % 1440) + 1440) % 1440
+  return `${Math.floor(total / 60)} h ${String(total % 60).padStart(2, '0')}`
+}
+
 /** Date et heure locales (bibliothèque, référence figée). */
 export function formatDateTime(iso: string): string {
   const date = new Date(iso)
@@ -154,6 +161,17 @@ export const SIGNAL_MODE_LABELS: Record<SignalMode, string> = {
   actuated: 'Adaptatif (détecteurs)',
   flashing: 'Clignotant',
   off: 'Éteint',
+}
+
+/** Jours de la semaine du modèle (`SimSettings.dayOfWeek`, 1 = lundi à 7 = dimanche). */
+export const DAY_LABELS: Record<number, string> = {
+  1: 'Lundi',
+  2: 'Mardi',
+  3: 'Mercredi',
+  4: 'Jeudi',
+  5: 'Vendredi',
+  6: 'Samedi',
+  7: 'Dimanche',
 }
 
 export const GREEN_KIND_LABELS: Record<GreenKind, string> = {
@@ -344,6 +362,7 @@ export const S = {
     regenerer: 'Régénérer le plan par défaut',
     confirmerRegenerer: 'Remplacer les phases actuelles par le plan par défaut à deux phases ?',
     schema: 'Cliquez une flèche : rouge → protégé → permis',
+    schemaGroupes: 'Verts déduits des groupes du dossier : le schéma n’est pas modifiable ici.',
     rouge: 'Rouge',
     diagramme: 'Déroulement du cycle',
     aucunePhase: 'Aucune phase : tous les mouvements restent au rouge.',
@@ -352,6 +371,42 @@ export const S = {
     phaseCourante: 'Phase en cours',
     mouvementsAucun: 'Aucun mouvement piloté : vérifiez la géométrie du carrefour.',
     selectionner: 'Voir sur la carte',
+    /* --- Dossiers de carrefour (docs/ARCHITECTURE.md §14) --- */
+    dossiers: 'Dossiers de carrefour',
+    dossiersAide: 'Fichier JSON des dossiers de la commune : groupes de signaux, phases, plans horaires et inter-verts. Les carrefours reconnus remplacent leur plan actuel.',
+    dossiersImporter: 'Importer des dossiers',
+    dossiersBilan: 'Bilan de l’import',
+    dossiersRattaches: 'carrefour(s) rattaché(s) et repris du dossier',
+    dossiersNonRattaches: 'dossier(s) laissé(s) de côté, faute de carrefour reconnu',
+    dossiersAucun: 'Aucun dossier n’a pu être rattaché : rien n’a été modifié.',
+    dossiersReserves: 'Réserves et anomalies',
+    origine: 'Origine des réglages',
+    groupes: 'Groupes de signaux',
+    groupeVehicule: 'Véhicules',
+    groupePieton: 'Piétons',
+    groupeSansVoie: 'Voie non précisée',
+    groupeMouvements: 'mouvement(s)',
+    groupeAucunMouvement: 'aucun mouvement',
+    groupeRappel: 'Rappel',
+    groupeRappelAide: 'Vert piéton donné à chaque cycle, sans appui sur un bouton poussoir.',
+    groupePietonAide: 'Un vert piéton interdit les mouvements véhicules qui franchissent sa traversée.',
+    plans: 'Plans de feux',
+    planCalendrier: 'Suivre le calendrier horaire',
+    planCalendrierAide: 'Le contrôleur change de plan en fin de cycle, selon l’heure simulée.',
+    planImpose: 'Plan imposé : l’affichage et la simulation ignorent le calendrier horaire.',
+    planSelection: 'Plan retenu',
+    planActif: 'Plan actif à',
+    planUnique: 'Plan unique',
+    planDurees: 'Durées de vert fixées par le plan',
+    planDecalage: 'Décalage imposé par le plan de feux retenu.',
+    planPeriodeInconnue: 'sans période',
+    heureSimulee: 'Heure de départ',
+    heureSimuleeAide: 'Heure du jour à l’instant 0 : elle désigne le plan de feux actif de chaque carrefour.',
+    jourSimule: 'Jour',
+    intervertsTitre: 'Inter-verts (s)',
+    intervertsAide: 'Temps de sécurité entre le groupe qui perd le vert (en ligne) et celui qui le prend (en colonne). Une case vide signale deux groupes compatibles, qui peuvent être verts ensemble.',
+    intervertJaune: 'Jaune',
+    intervertsRemplacent: 'Elle remplace l’orange et le rouge intégral ci-dessus pour les phases écrites en groupes.',
   },
   trafic: {
     titre: 'Trafic',

@@ -25,7 +25,10 @@ import type { FromWorker, SimClientFactory, SimClientLike } from '@/engine/proto
 import { shortestPathNodes } from '@/engine/routing'
 import { SimClient } from '@/engine/client'
 import type { OsmExtract } from '@/geo/types'
-import type { AppState, AppStoreOptions, CsvImportReport, Selection, SimState, UiState } from './storeTypes'
+import { importDossiersFeux as lireDossiersFeux } from '@/geo/dossierFeux'
+import type {
+  AppState, AppStoreOptions, CsvImportReport, DossierImportReport, Selection, SimState, UiState,
+} from './storeTypes'
 import * as edits from './edits'
 import * as persistence from './persistence'
 import { parseDemandCsv, serializeDemandCsv } from './csv'
@@ -54,6 +57,7 @@ const INITIAL_UI: UiState = {
   tool: 'select',
   toolNodes: [],
   addEdgeOptions: { twoWay: true, highway: 'residential', lanes: 1, maxspeed: 50 },
+  planApercu: {},
   revealCounter: 0,
 }
 
@@ -164,11 +168,20 @@ function applyNodeControl(network: Network, nodeId: NodeId, control: Omit<NodeCo
   return { ...network, controls, controllers }
 }
 
-/** Deux contrôleurs ont-ils les mêmes réglages hors phases (test de non-modification) ? */
+/**
+ * Deux contrôleurs ont-ils les mêmes réglages hors phases (test de non-modification) ?
+ *
+ * Les données de dossier (groupes, inter-verts, plans, calendrier) sont comparées par identité : le
+ * contrôleur modifié étant construit par `{ ...current, ...patch }`, un champ absent du correctif garde
+ * sa référence. Sans elles, un correctif ne portant que sur un dossier serait pris pour un non-changement
+ * et jeté en silence.
+ */
 function sameControllerHeader(a: SignalController, b: SignalController): boolean {
   return a.name === b.name && a.mode === b.mode && a.offset === b.offset && a.amber === b.amber
     && a.allRed === b.allRed && a.actuated.skipEmpty === b.actuated.skipEmpty
     && a.nodeIds.length === b.nodeIds.length && a.nodeIds.every((n, i) => n === b.nodeIds[i])
+    && a.groups === b.groups && a.interGreen === b.interGreen && a.amberByGroup === b.amberByGroup
+    && a.plans === b.plans && a.schedule === b.schedule && a.source === b.source
 }
 
 /** Applique un correctif de contrôleur ; un changement de `nodeIds` entraîne celui des régulations de nœud. */
@@ -207,6 +220,28 @@ function applyControllerPatch(
   }
   if (!changed) return network
   return { ...network, controllers: { ...network.controllers, [id]: next }, controls }
+}
+
+/**
+ * Réseau tel que le moteur doit le voir : un plan de feux imposé depuis l'interface (`ui.planApercu`)
+ * prend la place du calendrier horaire du contrôleur concerné.
+ *
+ * Le plan retenu passe en tête de `plans` et le calendrier est retiré : `activePlan` (model/signals.ts)
+ * renvoie alors ce plan quelle que soit l'heure simulée. Sans plan imposé, le réseau du projet est renvoyé
+ * tel quel — un projet sans plans horaires n'est jamais recopié.
+ */
+function networkWithForcedPlans(network: Network, planApercu: Record<ControllerId, string>): Network {
+  let controllers: Record<ControllerId, SignalController> | null = null
+  for (const [id, planId] of Object.entries(planApercu)) {
+    const controller = network.controllers[id]
+    const plans = controller?.plans
+    const plan = plans?.find((p) => p.id === planId)
+    if (!controller || !plans || !plan) continue
+    const { schedule: _calendrier, ...reste } = controller
+    controllers ??= { ...network.controllers }
+    controllers[id] = { ...reste, plans: [plan, ...plans.filter((p) => p.id !== plan.id)] }
+  }
+  return controllers ? { ...network, controllers } : network
 }
 
 /** Tronçon le plus court reliant directement deux nœuds (onde verte). */
@@ -248,8 +283,17 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       const out: Partial<AppState> = {}
       if (state.selection && !alive(state.selection)) out.selection = null
       if (state.hover && !alive(state.hover)) out.hover = null
+      let ui = state.ui
       const toolNodes = state.ui.toolNodes.filter((id) => project.network.nodes[id])
-      if (toolNodes.length !== state.ui.toolNodes.length) out.ui = { ...state.ui, toolNodes }
+      if (toolNodes.length !== state.ui.toolNodes.length) ui = { ...ui, toolNodes }
+      // Un plan imposé sur un contrôleur (ou un plan) disparu — annulation d'un import, suppression du
+      // carrefour — n'a plus d'objet : il est retiré comme la sélection.
+      const planApercu: Record<ControllerId, string> = {}
+      for (const [id, planId] of Object.entries(state.ui.planApercu)) {
+        if (project.network.controllers[id]?.plans?.some((p) => p.id === planId)) planApercu[id] = planId
+      }
+      if (Object.keys(planApercu).length !== Object.keys(state.ui.planApercu).length) ui = { ...ui, planApercu }
+      if (ui !== state.ui) out.ui = ui
       return out
     }
 
@@ -269,7 +313,8 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       const running = get().sim.status === 'running' || get().sim.status === 'paused'
       const hot = kind === 'signals' && client !== null && engineReady && running && !get().sim.stale
       if (hot && client) {
-        client.send({ type: 'updateSignals', controllers: next.network.controllers, controls: next.network.controls })
+        const vue = networkWithForcedPlans(next.network, get().ui.planApercu)
+        client.send({ type: 'updateSignals', controllers: vue.controllers, controls: vue.controls })
       }
       set((s) => ({
         project: next,
@@ -396,9 +441,11 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       if (!client) client = makeClient(handleEngineMessage)
       // Une simulation terminée doit repartir de zéro au prochain lancement.
       if (!engineReady || get().sim.stale || get().sim.status === 'done') {
+        // Le moteur reçoit le réseau vu par l'interface : plans de feux imposés compris (§14.4).
+        const network = networkWithForcedPlans(project.network, get().ui.planApercu)
         client.send({
           type: 'init',
-          payload: { network: project.network, demand: project.demand, settings: project.settings },
+          payload: { network, demand: project.demand, settings: project.settings },
         })
         engineReady = true
         set((s) => ({ sim: { ...s.sim, stale: false, time: 0, results: null, frame: null } }))
@@ -566,7 +613,8 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
           selection: null,
           hover: null,
           drag: null,
-          ui: { ...s.ui, toolNodes: [] },
+          // Les plans imposés désignaient les carrefours du projet précédent : ils n'ont plus de sens ici.
+          ui: { ...s.ui, toolNodes: [], planApercu: {} },
           sim: { ...INITIAL_SIM, speed: s.sim.speed },
           canUndo: false,
           canRedo: false,
@@ -865,6 +913,62 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
           }
         }, 'signals')
         return { controllers: stops.length, path }
+      },
+
+      importDossiersFeux(text: string): DossierImportReport {
+        const project = get().project
+        if (!project) return { matches: 0, nonRattaches: 0, avertissements: ['Aucun projet chargé.'] }
+        // Le module d'import ne lève jamais : un fichier illisible ressort en avertissements (§14).
+        const resultat = lireDossiersFeux(text, { network: project.network })
+        const rattaches = resultat.matches.filter((m) => m.nodeId !== null && m.controllerId !== null)
+        const avertissements = [...resultat.avertissements]
+        for (const m of resultat.matches) {
+          const prefixe = `${m.nom} (${m.dossierId})`
+          if (m.nodeId === null) avertissements.push(`${prefixe} : non rattaché — ${m.raison}.`)
+          else if (m.confiance !== 'sure') avertissements.push(`${prefixe} : rattachement à confirmer — ${m.raison}.`)
+          for (const a of m.avertissements) avertissements.push(`${prefixe} : ${a}`)
+        }
+        const bilan: DossierImportReport = {
+          matches: rattaches.length,
+          nonRattaches: resultat.matches.length - rattaches.length,
+          avertissements,
+        }
+        if (!rattaches.length) return bilan
+        const n = rattaches.length
+        editNetwork(
+          `Import de ${n} dossier${n > 1 ? 's' : ''} de carrefour`,
+          (network) => ({
+            ...network,
+            // Un dossier remplace intégralement le contrôleur du carrefour qu'il décrit ; les autres carrefours
+            // ne sont pas touchés, un fichier partiel ne défait donc pas le reste du projet.
+            controllers: { ...network.controllers, ...resultat.controllers },
+            controls: { ...network.controls, ...resultat.controls },
+          }),
+          'signals',
+        )
+        return bilan
+      },
+
+      setActivePlan(controllerId, planId): void {
+        const state = get()
+        const controller = state.project?.network.controllers[controllerId]
+        if (!controller) return
+        const retenu = planId && controller.plans?.some((p) => p.id === planId) ? planId : null
+        if ((state.ui.planApercu[controllerId] ?? null) === retenu) return
+        const planApercu = { ...state.ui.planApercu }
+        if (retenu) planApercu[controllerId] = retenu
+        else delete planApercu[controllerId]
+        set((s) => ({ ui: { ...s.ui, planApercu } }))
+        // Même règle que pour une modification de feux : appliqué à chaud pendant une exécution, sinon
+        // l'état devient périmé et le prochain lancement repart avec le plan choisi.
+        const project = get().project
+        const running = state.sim.status === 'running' || state.sim.status === 'paused'
+        if (project && client && engineReady && running && !state.sim.stale) {
+          const vue = networkWithForcedPlans(project.network, planApercu)
+          client.send({ type: 'updateSignals', controllers: vue.controllers, controls: vue.controls })
+        } else {
+          set((s) => ({ sim: { ...s.sim, stale: true } }))
+        }
       },
 
       /* --------- Demande --------- */

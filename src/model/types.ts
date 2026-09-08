@@ -19,7 +19,13 @@ export type ControllerId = string
 export type MovementKey = string
 
 export const PROJECT_FORMAT = 'circulation-project' as const
-export const PROJECT_VERSION = 1 as const
+/**
+ * Version 2 : ajout des données de dossier de carrefour (groupes, inter-verts, plans horaires) et de
+ * l'heure simulée. Un fichier version 1 se relit sans perte, ces champs étant tous facultatifs ; en sens
+ * inverse, une version antérieure du logiciel refuse explicitement un fichier version 2 au lieu d'en
+ * abandonner les réglages de feux en silence.
+ */
+export const PROJECT_VERSION = 2 as const
 
 export type HighwayClass =
   | 'motorway' | 'trunk' | 'primary' | 'secondary' | 'tertiary'
@@ -86,6 +92,74 @@ export interface NodeControl {
 
 export type SignalMode = 'fixed' | 'actuated' | 'flashing' | 'off'
 
+/* ------------------------- Dossiers de carrefour ------------------------- */
+
+/**
+ * Groupe de feux au sens d'un dossier de carrefour : l'ensemble des signaux commandés ensemble
+ * (V1, V2… pour les véhicules, P1, P2… pour les traversées piétonnes).
+ *
+ * Les plans réels sont écrits en groupes, pas en mouvements : c'est l'unité des matrices d'inter-verts
+ * et des phases. Le simulateur reste piloté par les mouvements ; un groupe fait le lien entre les deux.
+ */
+export interface SignalGroup {
+  /** Identifiant du dossier (`V1`, `P2`…). */
+  id: string
+  type: 'vehicule' | 'pieton'
+  /** Voie ou traversée commandée, telle qu'elle figure au dossier. */
+  label?: string
+  /**
+   * Groupe véhicule : mouvements autorisés pendant son vert.
+   * Groupe piéton : mouvements véhicules **interdits** pendant son vert, car ils franchissent la traversée.
+   */
+  movements: MovementKey[]
+  /** Le vert piéton est donné à chaque cycle sans appui sur un bouton poussoir. */
+  recall?: boolean
+}
+
+/**
+ * Temps de sécurité entre deux groupes, en secondes : `interGreen[perdLeVert][prendLeVert]`.
+ * Une case absente signifie que les deux groupes sont compatibles et peuvent être verts ensemble.
+ */
+export type InterGreenMatrix = Record<string, Record<string, number>>
+
+/** Réglages d'une phase propres à un plan de feux. */
+export interface PlanPhaseTiming {
+  /** Durée de vert (s) en mode fixe. */
+  green: number
+  minGreen?: number
+  maxGreen?: number
+  /**
+   * La phase ne s'ouvre pas dans ce plan. Les dossiers déclarent des phases propres à un plan
+   * (une sous-phase de pointe, une phase escamotable de nuit) : sans ce drapeau, elles tourneraient
+   * dans tous les plans et allongeraient le cycle des heures creuses.
+   */
+  skipped?: boolean
+}
+
+/** Plan de feux : un jeu de réglages appliqué sur une plage horaire (pointe du matin, heure creuse…). */
+export interface SignalPlan {
+  id: string
+  name: string
+  /** Période telle que décrite au dossier (« 7h-9h »), à titre documentaire. */
+  period?: string
+  /** Temps de cycle visé (s) ; 0 laisse la somme des phases faire foi. */
+  cycle: number
+  /** Décalage du début de cycle (s), pour les ondes vertes. */
+  offset: number
+  /** Durées par identifiant de phase ; une phase absente garde les valeurs portées par la phase. */
+  phases: Record<string, PlanPhaseTiming>
+}
+
+/** Plage horaire d'application d'un plan de feux. */
+export interface PlanSchedule {
+  planId: string
+  /** Minutes depuis minuit. `fromMin` supérieur à `toMin` signifie une plage qui franchit minuit. */
+  fromMin: number
+  toMin: number
+  /** Jours concernés, 1 = lundi à 7 = dimanche ; liste vide = tous les jours. */
+  days: number[]
+}
+
 /** État de vert d'un mouvement dans une phase. Absent de `movements` = rouge. */
 export type GreenKind = 'protected' | 'permitted'
 
@@ -99,6 +173,8 @@ export interface SignalPhase {
   allRed?: number
   /** Mouvements au vert pendant la phase. */
   movements: Record<MovementKey, GreenKind>
+  /** Groupes au vert pendant la phase (plans importés). Les mouvements en sont dérivés. */
+  groups?: string[]
   /** Paramètres du mode adaptatif (`actuated`). */
   minGreen: number
   maxGreen: number
@@ -115,11 +191,30 @@ export interface SignalController {
   /** Nœuds couverts (carrefour regroupé : feux OSM à moins de 30 m). */
   nodeIds: NodeId[]
   mode: SignalMode
-  /** Décalage du début de cycle (s) — pour les ondes vertes. */
+  /** Décalage du début de cycle (s) — pour les ondes vertes. Ignoré quand un plan actif porte le sien. */
   offset: number
+  /** Jaune par défaut (s), utilisé à défaut de matrice d'inter-verts. */
   amber: number
+  /** Rouge intégral par défaut (s), utilisé à défaut de matrice d'inter-verts. */
   allRed: number
   phases: SignalPhase[]
+  /* --- Données issues d'un dossier de carrefour, absentes des plans créés dans l'éditeur --- */
+  /** Groupes de feux ; permet aux phases, aux inter-verts et aux piétons de parler la même langue. */
+  groups?: SignalGroup[]
+  /**
+   * Inter-verts par couple de groupes. Quand la matrice existe, elle remplace `amber` + `allRed` :
+   * la durée séparant deux phases dépend des groupes qui perdent et prennent le vert, ce qui est le
+   * comportement réel d'un contrôleur.
+   */
+  interGreen?: InterGreenMatrix
+  /** Durée du jaune par groupe véhicule (s), colonne « jaune » de la matrice du dossier. */
+  amberByGroup?: Record<string, number>
+  /** Plans de feux disponibles. Sans `schedule`, le premier plan s'applique en permanence. */
+  plans?: SignalPlan[]
+  /** Plages horaires d'application des plans, évaluées sur l'heure simulée. */
+  schedule?: PlanSchedule[]
+  /** Origine des réglages (« dossier VE005 », « plan par défaut »), affichée dans le panneau Feux. */
+  source?: string
   actuated: {
     /** Sauter les phases sans demande (aucun véhicule en attente ni arrivé sur ses approches). */
     skipEmpty: boolean
@@ -205,6 +300,13 @@ export interface SimSettings {
   stopDelay: number
   /** Intervalle d'agrégation des séries (min). */
   statsIntervalMin: number
+  /**
+   * Heure du jour à l'instant 0 de la simulation, en minutes depuis minuit (par défaut 8 h).
+   * Sert à choisir le plan de feux actif dans les carrefours qui en possèdent plusieurs.
+   */
+  startTimeOfDayMin: number
+  /** Jour de la semaine simulé, 1 = lundi à 7 = dimanche (par défaut mardi). */
+  dayOfWeek: number
 }
 
 /* ----------------------------- Résultats ----------------------------- */
