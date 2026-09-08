@@ -25,9 +25,11 @@ import type { FromWorker, SimClientFactory, SimClientLike } from '@/engine/proto
 import { shortestPathNodes } from '@/engine/routing'
 import { SimClient } from '@/engine/client'
 import type { OsmExtract } from '@/geo/types'
-import { importDossiersFeux as lireDossiersFeux } from '@/geo/dossierFeux'
+import type { DossierImportResult, LibelleVoie } from '@/geo/dossierFeux'
+import { importDossiersFeux as lireDossiersFeux, libellesDeVoies, memeVoie, normaliserVoie } from '@/geo/dossierFeux'
 import type {
-  AppState, AppStoreOptions, CsvImportReport, DossierImportReport, Selection, SimState, UiState,
+  AppState, AppStoreOptions, CarrefourCandidat, CsvImportReport, DossierImportReport, DossierNonRattache,
+  Selection, SimState, UiState,
 } from './storeTypes'
 import * as edits from './edits'
 import * as persistence from './persistence'
@@ -254,6 +256,169 @@ function edgeBetween(edgesFrom: NetEdge[] | undefined, to: NodeId): NetEdge | un
   return best
 }
 
+/* ---------- Rattachement manuel d'un dossier de carrefour (§14.3) ---------- */
+
+interface CarrefourNomme {
+  nodeId: NodeId
+  /** Noms de rues du carrefour, normalisés comme le fait l'importeur. */
+  libelles: LibelleVoie[]
+  etiquette: string
+}
+
+/**
+ * Carrefours du réseau susceptibles de porter un dossier, avec leurs rues.
+ *
+ * Même règle que l'importeur : un nœud déjà à feux, ou de trois branches au moins — un simple point de
+ * coupure de rue n'est pas un carrefour. Le recensement est refait ici parce que `DossierMatch` ne rend
+ * pas la liste des carrefours qu'il a jugés équivalents : sa phrase d'explication n'en cite que trois, et
+ * par leur nom seul. La comparaison des noms, elle, reste celle de l'importeur (`normaliserVoie`,
+ * `memeVoie`) : les deux lectures ne peuvent pas diverger sur le fond.
+ */
+function carrefoursDuReseau(network: Network): CarrefourNomme[] {
+  const adjacency = buildAdjacency(network)
+  const out: CarrefourNomme[] = []
+  for (const node of Object.values(network.nodes)) {
+    if (node.boundary) continue
+    const incidents = [...(adjacency.incoming.get(node.id) ?? []), ...(adjacency.outgoing.get(node.id) ?? [])]
+    if (!incidents.length) continue
+    const voisins = new Set<NodeId>()
+    const noms = new Set<string>()
+    for (const e of incidents) {
+      voisins.add(e.from === node.id ? e.to : e.from)
+      if (e.name) noms.add(e.name)
+    }
+    if (network.controls[node.id]?.type !== 'signals' && voisins.size < 3) continue
+    const libelles: LibelleVoie[] = []
+    for (const nom of noms) {
+      const v = normaliserVoie(nom)
+      if (v) libelles.push(v)
+    }
+    out.push({ nodeId: node.id, libelles, etiquette: node.label || [...noms].slice(0, 2).join(' / ') || node.id })
+  }
+  return out
+}
+
+/**
+ * Dossiers bruts d'un fichier déjà analysé : la liste `carrefours` (ou `dossiers`), ou le tableau lui-même.
+ * Même lecture tolérante que l'importeur, mais réduite à ce qu'il faut pour retrouver un dossier par la suite.
+ */
+function dossiersBruts(racine: unknown): Record<string, unknown>[] {
+  const liste = Array.isArray(racine)
+    ? racine
+    : typeof racine === 'object' && racine !== null
+      ? (racine as Record<string, unknown>).carrefours ?? (racine as Record<string, unknown>).dossiers
+      : undefined
+  if (!Array.isArray(liste)) return []
+  return liste.filter((d): d is Record<string, unknown> => typeof d === 'object' && d !== null && !Array.isArray(d))
+}
+
+/**
+ * Voies telles que le dossier les écrit en entête, à afficher à l'exploitant : « Avenue de la Libération
+ * (D1082), Rue de Jourcey, Rue de la Guillonnière ». Ce sont les rues qu'il reconnaîtra sur le terrain.
+ *
+ * Surtout pas les libellés normalisés de `voiesDuDossier` : eux sont découpés pour la comparaison, et
+ * ressortiraient en bouillie (« arrivée nord », « côté parking », « CE14+M9z »). À défaut d'entête, les
+ * voies des groupes, faute de mieux.
+ */
+function voiesDeclarees(dossier: unknown): string[] {
+  if (typeof dossier !== 'object' || dossier === null) return []
+  const brut = dossier as Record<string, unknown>
+  const textes = (v: unknown): string[] => {
+    if (typeof v === 'string') return [v]
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  }
+  const groupes = Array.isArray(brut.groupes) ? brut.groupes : []
+  const source = textes(brut.voies ?? brut.voies_plan).length
+    ? textes(brut.voies ?? brut.voies_plan)
+    : groupes.flatMap((g) => textes(typeof g === 'object' && g !== null ? (g as Record<string, unknown>).voie : undefined))
+  const vues = new Set<string>()
+  const out: string[] = []
+  for (const t of source) {
+    const propre = t.trim()
+    if (!propre || vues.has(propre)) continue
+    vues.add(propre)
+    out.push(propre)
+  }
+  return out
+}
+
+/** Voies nommées par un dossier : celles de l'entête et celles de ses groupes, un nom n'étant compté qu'une fois. */
+function voiesDuDossier(dossier: unknown): LibelleVoie[] {
+  if (typeof dossier !== 'object' || dossier === null) return []
+  const brut = dossier as Record<string, unknown>
+  const groupes = Array.isArray(brut.groupes) ? brut.groupes : []
+  const voies = [
+    ...libellesDeVoies(brut.voies ?? brut.voies_plan),
+    ...groupes.flatMap((g) => libellesDeVoies(typeof g === 'object' && g !== null ? (g as Record<string, unknown>).voie : undefined)),
+  ]
+  const parNoyau = new Map<string, LibelleVoie>()
+  for (const v of voies) if (!parNoyau.has(v.noyau)) parNoyau.set(v.noyau, v)
+  return [...parNoyau.values()]
+}
+
+/**
+ * Carrefours qui reconnaissent le plus de voies du dossier, à égalité : ceux entre lesquels l'importeur
+ * a refusé de choisir. Liste vide quand aucun carrefour ne porte la moindre voie du dossier — le
+ * rattachement reste alors possible, mais depuis la carte.
+ *
+ * Deux carrefours voisins portent souvent les deux mêmes rues (« Avenue Paccard / Place Jacques Raffin »
+ * deux fois de suite) : ils sont alors numérotés, sans quoi la liste proposerait deux fois le même
+ * libellé sans moyen de les distinguer autrement qu'en les montrant sur la carte.
+ */
+function candidatsPourDossier(network: Network, dossier: unknown): CarrefourCandidat[] {
+  const voies = voiesDuDossier(dossier)
+  if (!voies.length) return []
+  let meilleur = 0
+  let retenus: CarrefourNomme[] = []
+  for (const carrefour of carrefoursDuReseau(network)) {
+    let reconnues = 0
+    for (const v of voies) if (carrefour.libelles.some((l) => memeVoie(v, l))) reconnues++
+    if (!reconnues) continue
+    if (reconnues > meilleur) {
+      meilleur = reconnues
+      retenus = [carrefour]
+    } else if (reconnues === meilleur) {
+      retenus.push(carrefour)
+    }
+  }
+  const comptes = new Map<string, number>()
+  for (const c of retenus) comptes.set(c.etiquette, (comptes.get(c.etiquette) ?? 0) + 1)
+  const rangs = new Map<string, number>()
+  return retenus.map((c) => {
+    if ((comptes.get(c.etiquette) ?? 0) < 2) return { nodeId: c.nodeId, etiquette: c.etiquette }
+    const rang = (rangs.get(c.etiquette) ?? 0) + 1
+    rangs.set(c.etiquette, rang)
+    return { nodeId: c.nodeId, etiquette: `${c.etiquette} (n° ${rang})` }
+  })
+}
+
+/**
+ * Réseau où seuls les tronçons touchant `carrefour` gardent leur nom.
+ *
+ * C'est ce qui permet de rattacher un dossier au carrefour désigné par l'exploitant sans réécrire une
+ * ligne de la conversion : l'importeur ne reconnaît un carrefour qu'aux noms de ses rues, donc un réseau
+ * où lui seul est nommé ne lui laisse aucune autre cible. La géométrie, l'adjacence et les régulations
+ * restent intactes : les mouvements construits au carrefour sont exactement ceux du réseau réel.
+ */
+function reseauLimiteA(network: Network, carrefour: Set<NodeId>): Network {
+  const edges: Record<EdgeId, NetEdge> = {}
+  for (const [id, e] of Object.entries(network.edges)) {
+    edges[id] = carrefour.has(e.from) || carrefour.has(e.to) ? e : { ...e, name: undefined }
+  }
+  return { ...network, edges }
+}
+
+/** Nœuds que le contrôleur du carrefour couvre : un dossier remplace le contrôleur entier, pas un seul de ses nœuds. */
+function noeudsDuCarrefour(network: Network, nodeId: NodeId): Set<NodeId> {
+  const out = new Set<NodeId>([nodeId])
+  const control = network.controls[nodeId]
+  const controller = control?.type === 'signals' && control.controllerId
+    ? network.controllers[control.controllerId]
+    : undefined
+  for (const n of controller?.nodeIds ?? []) if (network.nodes[n]) out.add(n)
+  return out
+}
+
 /* ------------------------------------------------------------------ */
 /*  Fabrique du store                                                  */
 /* ------------------------------------------------------------------ */
@@ -294,6 +459,16 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       }
       if (Object.keys(planApercu).length !== Object.keys(state.ui.planApercu).length) ui = { ...ui, planApercu }
       if (ui !== state.ui) out.ui = ui
+      // Un dossier en attente propose des carrefours : celui qui vient d'être supprimé ne doit plus figurer
+      // dans la liste, sinon le rattachement viserait un nœud absent du réseau.
+      let dossiersChanges = false
+      const dossiers = state.dossiersNonRattaches.map((d) => {
+        const candidats = d.candidats.filter((c) => project.network.nodes[c.nodeId])
+        if (candidats.length === d.candidats.length) return d
+        dossiersChanges = true
+        return { ...d, candidats }
+      })
+      if (dossiersChanges) out.dossiersNonRattaches = dossiers
       return out
     }
 
@@ -471,6 +646,8 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       error: null,
       library: [],
       dirty: false,
+      dossiersRapport: null,
+      dossiersNonRattaches: [],
 
       /* --------- Projet --------- */
 
@@ -620,6 +797,9 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
           canRedo: false,
           dirty: false,
           error: null,
+          // Idem pour un import de dossiers : ses carrefours candidats appartenaient à l'autre réseau.
+          dossiersRapport: null,
+          dossiersNonRattaches: [],
         }))
         autosave(next)
       },
@@ -856,12 +1036,25 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         const controller = project?.network.controllers[controllerId]
         if (!project || !controller) return
         const plan = createDefaultSignalPlan(project.network, controller.nodeIds)
-        commit('Plan de feux régénéré', (draft) => {
+        // Détacher le dossier fait partie du retour au plan par défaut : les groupes, les inter-verts, les
+        // plans horaires et le calendrier décrivaient les phases qui disparaissent. Les laisser en place
+        // donnerait des plans renvoyant à des phases inexistantes et des groupes ne commandant plus rien,
+        // sous une origine annonçant toujours le dossier.
+        const label = controller.source
+          ? `Plan de feux régénéré (${controller.source} détaché)`
+          : 'Plan de feux régénéré'
+        commit(label, (draft) => {
           const target = draft.network.controllers[controllerId]
           if (!target) return
           target.phases = castDraft(plan.phases)
           target.amber = plan.amber
           target.allRed = plan.allRed
+          delete target.groups
+          delete target.interGreen
+          delete target.amberByGroup
+          delete target.plans
+          delete target.schedule
+          delete target.source
         }, 'signals')
       },
 
@@ -918,21 +1111,50 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       importDossiersFeux(text: string): DossierImportReport {
         const project = get().project
         if (!project) return { matches: 0, nonRattaches: 0, avertissements: ['Aucun projet chargé.'] }
-        // Le module d'import ne lève jamais : un fichier illisible ressort en avertissements (§14).
-        const resultat = lireDossiersFeux(text, { network: project.network })
+        // Le fichier est lu ici pour retrouver le contenu brut de chaque dossier, que le bilan de l'import
+        // ne rend pas : un dossier laissé de côté doit rester rattachable à la main plus tard, et cela
+        // suppose de pouvoir le repasser à l'importeur tel quel. Le module d'import accepte aussi bien le
+        // texte que la valeur déjà analysée, et ne lève jamais : un fichier illisible ressort en
+        // avertissements (§14).
+        let racine: unknown = text
+        try {
+          racine = JSON.parse(text)
+        } catch {
+          // Fichier illisible : l'importeur le dira mieux, avec le vocabulaire de l'exploitant.
+        }
+        const resultat = lireDossiersFeux(racine, { network: project.network })
+        const bruts = dossiersBruts(racine)
         const rattaches = resultat.matches.filter((m) => m.nodeId !== null && m.controllerId !== null)
         const avertissements = [...resultat.avertissements]
-        for (const m of resultat.matches) {
+        const enAttente: DossierNonRattache[] = []
+        resultat.matches.forEach((m, i) => {
           const prefixe = `${m.nom} (${m.dossierId})`
-          if (m.nodeId === null) avertissements.push(`${prefixe} : non rattaché — ${m.raison}.`)
-          else if (m.confiance !== 'sure') avertissements.push(`${prefixe} : rattachement à confirmer — ${m.raison}.`)
+          if (m.nodeId === null) {
+            avertissements.push(`${prefixe} : non rattaché — ${m.raison}.`)
+            // L'importeur produit exactement un bilan par dossier lu, dans l'ordre du fichier ; le
+            // rapprochement par identifiant reste prioritaire, l'ordre n'étant pas un contrat.
+            const brut = bruts.find((d) => typeof d.id === 'string' && d.id.trim() === m.dossierId) ?? bruts[i]
+            if (brut) {
+              enAttente.push({
+                dossierId: m.dossierId,
+                nom: m.nom,
+                voies: voiesDeclarees(brut),
+                raison: m.raison,
+                candidats: candidatsPourDossier(project.network, brut),
+                brut,
+              })
+            }
+          } else if (m.confiance !== 'sure') {
+            avertissements.push(`${prefixe} : rattachement à confirmer — ${m.raison}.`)
+          }
           for (const a of m.avertissements) avertissements.push(`${prefixe} : ${a}`)
-        }
+        })
         const bilan: DossierImportReport = {
           matches: rattaches.length,
           nonRattaches: resultat.matches.length - rattaches.length,
           avertissements,
         }
+        set({ dossiersRapport: bilan, dossiersNonRattaches: enAttente })
         if (!rattaches.length) return bilan
         const n = rattaches.length
         editNetwork(
@@ -947,6 +1169,83 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
           'signals',
         )
         return bilan
+      },
+
+      rattacherDossier(dossierId: string, nodeId: NodeId): void {
+        const project = get().project
+        const dossier = get().dossiersNonRattaches.find((d) => d.dossierId === dossierId)
+        if (!project || !dossier) return
+        const noeud = project.network.nodes[nodeId]
+        if (!noeud) {
+          set({ error: `Ce carrefour n’existe plus dans le réseau : le dossier ${dossierId} n’a pas été rattaché.` })
+          return
+        }
+        // Le dossier est repassé à l'importeur, seul, sur un réseau où seul le carrefour choisi est nommé :
+        // la conversion (groupes, phases, plans, calendrier, inter-verts) reste celle de l'import
+        // automatique, à ceci près que le carrefour est imposé au lieu d'être deviné.
+        //
+        // Le contrat à vérifier n'est pas « l'importeur a visé ce nœud » mais « ce nœud est bien passé sous
+        // le contrôleur du dossier » : un carrefour regroupé (plusieurs nœuds à feux sous un même
+        // contrôleur) est rattaché par n'importe lequel de ses nœuds, et tous en héritent.
+        const essayer = (noms: Set<NodeId>): DossierImportResult => lireDossiersFeux(
+          { carrefours: [dossier.brut] },
+          { network: reseauLimiteA(project.network, noms) },
+        )
+        /** Contrôleur sous lequel le nœud choisi est passé, `null` si le rattachement n'a pas abouti. */
+        const rattachement = (r: DossierImportResult): ControllerId | null => {
+          const id = r.matches[0]?.controllerId
+          return id && r.controls[nodeId]?.controllerId === id ? id : null
+        }
+        // Premier essai : tout le carrefour regroupé reste nommé, pour que les groupes du dossier
+        // retrouvent les approches de chacun de ses nœuds.
+        let resultat = essayer(noeudsDuCarrefour(project.network, nodeId))
+        let controllerId = rattachement(resultat)
+        if (!controllerId) {
+          // Second essai : deux nœuds d'un même carrefour regroupé peuvent se valoir, et l'importeur refuse
+          // alors de trancher entre eux comme il l'a fait à l'import. Ne garder que le nœud désigné lève
+          // l'égalité ; les groupes de l'autre moitié resteront peut-être sans mouvement, mais un
+          // rattachement partiel vaut mieux qu'un refus que l'exploitant ne peut pas contourner.
+          resultat = essayer(new Set([nodeId]))
+          controllerId = rattachement(resultat)
+        }
+        const m = resultat.matches[0]
+        const nom = noeud.label || nodeId
+        if (!controllerId) {
+          set({ error: `Le dossier ${dossierId} ne décrit rien qui s’applique à ${nom} : ${m?.raison ?? 'dossier illisible'}.` })
+          return
+        }
+        const applique = editNetwork(
+          `Dossier ${dossierId} rattaché au carrefour ${nom}`,
+          (network) => ({
+            ...network,
+            controllers: { ...network.controllers, ...resultat.controllers },
+            controls: { ...network.controls, ...resultat.controls },
+          }),
+          'signals',
+        )
+        if (!applique) {
+          set({ error: `Le dossier ${dossierId} décrit déjà exactement le plan en place à ${nom} : rien n’a changé.` })
+          return
+        }
+        // Le dossier est traité : il quitte la liste d'attente, ses réserves de lecture rejoignent le bilan
+        // de l'import, et son carrefour devient la sélection pour être relu tout de suite.
+        set((s) => ({
+          dossiersNonRattaches: s.dossiersNonRattaches.filter((d) => d.dossierId !== dossierId),
+          dossiersRapport: s.dossiersRapport
+            ? {
+                matches: s.dossiersRapport.matches + 1,
+                nonRattaches: Math.max(0, s.dossiersRapport.nonRattaches - 1),
+                avertissements: [
+                  ...s.dossiersRapport.avertissements,
+                  `${dossier.nom} (${dossierId}) : rattaché à la main au carrefour ${nom}.`,
+                  ...m.avertissements.map((a) => `${dossier.nom} (${dossierId}) : ${a}`),
+                ],
+              }
+            : null,
+        }))
+        // `m.controllerId` est renseigné dès que le rattachement a abouti ; le test lève l'ambiguïté de type.
+        if (m.controllerId) get().select({ kind: 'controller', id: m.controllerId }, { reveal: true })
+        else get().select({ kind: 'node', id: nodeId }, { reveal: true })
       },
 
       setActivePlan(controllerId, planId): void {

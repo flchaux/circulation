@@ -225,6 +225,21 @@ function sansAccents(s: string): string {
   return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
 
+/**
+ * Apostrophes et tirets typographiques ramenés à leur forme droite, AVANT tout autre traitement.
+ *
+ * Le réseau OSM porte « Place de l’Europe » (apostrophe U+2019) là où le dossier écrit « Place de
+ * l'Europe » : deux libellés identiques à l’œil, mais deux suites de caractères différentes. Le
+ * découpage général ramène déjà l’un et l’autre à un espace ; l’unification les rend aussi
+ * comparables partout où la ponctuation est conservée — c’est le cas des noms de phases, où
+ * l’apostrophe distingue « Phase A' escamotable » de « Phase A escamotable ».
+ */
+function unifierPonctuation(s: string): string {
+  return s
+    .replace(/[\u2018\u2019\u201a\u201b\u2032\u02bc\u00b4\u0060]/g, "'")
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+}
+
 /** Libellé de voie comparable : forme complète normalisée + noyau (nom propre seul). */
 export interface LibelleVoie {
   /** Libellé d'origine, pour les messages destinés à l'exploitant. */
@@ -240,7 +255,7 @@ export interface LibelleVoie {
  * « Av. Gal de Gaulle » et « Avenue du Général de Gaulle » se ramènent au même noyau « general de gaulle ».
  */
 export function normaliserVoie(brut: string): LibelleVoie | null {
-  const base = sansAccents(brut.toLowerCase())
+  const base = sansAccents(unifierPonctuation(brut).toLowerCase())
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
   if (!base) return null
@@ -248,6 +263,9 @@ export function normaliserVoie(brut: string): LibelleVoie | null {
   const numerotee = base
     .replace(/\b(?:rd|route departementale|departementale)\s*(\d+)\b/g, 'd$1')
     .replace(/\b(?:rn|route nationale|nationale)\s*(\d+)\b/g, 'n$1')
+    // « D 54 » et « M 10 » : sans recoller la lettre au numéro, « d » serait pris pour la particule « de »
+    // et le noyau se réduirait au nombre seul, qui ne désigne plus rien.
+    .replace(/\b([dnm])\s+(\d+)\b/g, '$1$2')
   const mots = numerotee.split(' ').filter(Boolean).map((m) => ABREVIATIONS.get(m) ?? m)
   if (!mots.length) return null
   const plein = mots.join(' ')
@@ -276,12 +294,76 @@ function contientMots(botte: string, aiguille: string): boolean {
   return ` ${botte} `.includes(` ${aiguille} `)
 }
 
+/**
+ * Mots outils, écrits ou non selon la source : le dossier dit « Rue de la Croix de Borne » quand OSM dit
+ * « Rue de la Croix Borne ». Ils ne portent aucun sens propre et ne peuvent donc pas distinguer deux
+ * voies ; les particules de lieu (« sur », « sous », « en »…) en sont volontairement exclues, elles
+ * distinguent de vraies voies (« Rue sur le Pont »).
+ */
+const MOTS_OUTILS = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'd', 'l'])
+
+/** Mots porteurs de sens d'un noyau, les mots outils retirés. */
+function motsSignifiants(noyau: string): string[] {
+  return noyau.split(' ').filter((m) => m !== '' && !MOTS_OUTILS.has(m))
+}
+
+/**
+ * `long` est-il `court` avec un seul mot inséré au milieu ?
+ *
+ * Un dossier écrit « Rue du Dr Igor Masourenok » quand OSM écrit « Rue du Docteur Masourenok » : le
+ * prénom est en trop d'un côté. L'insertion reste encadrée, faute de quoi la tolérance rapprocherait des
+ * voies réellement différentes : au moins deux mots communs, et le mot en trop ni en tête ni en queue.
+ * « Croix des Pères » et « Croix de Borne » gardent ainsi deux mots signifiants distincts.
+ */
+function unMotEnTrop(court: string[], long: string[]): boolean {
+  if (long.length !== court.length + 1 || court.length < 2) return false
+  let i = 0
+  while (i < court.length && court[i] === long[i]) i++
+  // `i` est la position du mot inséré : il doit rester un mot commun de chaque côté.
+  if (i === 0 || i >= long.length - 1) return false
+  for (let j = i; j < court.length; j++) if (court[j] !== long[j + 1]) return false
+  return true
+}
+
 /** Deux libellés désignent-ils la même voie ? Égalité du noyau, ou inclusion d'un noyau assez long. */
 export function memeVoie(a: LibelleVoie, b: LibelleVoie): boolean {
   if (a.plein === b.plein || a.noyau === b.noyau) return true
+  const ma = motsSignifiants(a.noyau)
+  const mb = motsSignifiants(b.noyau)
+  // Mêmes mots porteurs de sens, dans le même ordre : seuls des mots outils les séparent.
+  if (ma.length > 0 && ma.length === mb.length && ma.every((m, i) => m === mb[i])) return true
+  if (unMotEnTrop(ma, mb) || unMotEnTrop(mb, ma)) return true
   if (a.noyau.length >= 5 && contientMots(b.noyau, a.noyau)) return true
   if (b.noyau.length >= 5 && contientMots(a.noyau, b.noyau)) return true
   return false
+}
+
+/** Une référence routière seule : « RD 1082 », « D1082 », « D 54 » se normalisent en « d1082 », « d54 ». */
+export function estReferenceRoutiere(noyau: string): boolean {
+  return /^[dnm]\d+$/.test(noyau)
+}
+
+/**
+ * Références routières que le dossier associe lui-même à un nom de voie, par la forme « Avenue de la
+ * Libération (D1082) ».
+ *
+ * Le graphe ne conserve que le `name` des tronçons, jamais leur `ref` : un groupe qui désigne son
+ * approche par « RD 1082 » ne peut être rattaché à aucun mouvement quand OSM nomme la voie « Avenue du
+ * Général de Gaulle ». Le rapprochement ne se fait qu'à l'intérieur d'un même dossier : à l'échelle du
+ * fichier, « D1082 » désigne tantôt l'Avenue de la Libération, tantôt l'Avenue du Général de Gaulle.
+ */
+export function referencesDuDossier(textes: string[]): Map<string, LibelleVoie> {
+  const out = new Map<string, LibelleVoie>()
+  for (const texte of textes) {
+    const m = /^([^()]+?)\s*\(([^()]+)\)\s*$/.exec(texte.trim())
+    if (!m) continue
+    const nomme = normaliserVoie(m[1])
+    const reference = normaliserVoie(m[2])
+    if (!nomme || !reference) continue
+    if (!estReferenceRoutiere(reference.noyau) || estReferenceRoutiere(nomme.noyau)) continue
+    if (!out.has(reference.noyau)) out.set(reference.noyau, nomme)
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------ */
@@ -291,7 +373,7 @@ export function memeVoie(a: LibelleVoie, b: LibelleVoie): boolean {
 const JOURS = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche']
 
 function normaliserTexte(s: string): string {
-  return sansAccents(s.toLowerCase()).replace(/[^a-z0-9]+/g, ' ').trim()
+  return sansAccents(unifierPonctuation(s).toLowerCase()).replace(/[^a-z0-9]+/g, ' ').trim()
 }
 
 /** Toutes les heures d'un texte, en minutes depuis minuit (« 6h30-9h » → [390, 540]). */
@@ -585,6 +667,65 @@ const CLES_NOM_LIGNE = ['groupe', 'de', 'ligne', 'depuis', 'source', 'nom', 'id'
 const CLES_ENTETE_MATRICE = new Set(['convention', 'groupes', 'valeurs', 'valeur_jaune_s', 'valeur_securite_s',
   'vitesses_degagement_adoptees', 'note', 'notes', 'unite'])
 
+/**
+ * Clés de « valeur_jaune_s » (ou « valeur_securite_s ») qui désignent une CATÉGORIE de groupes et non un
+ * groupe : c'est ainsi que les six dossiers réels écrivent la colonne de droite du tableau papier, une
+ * valeur unique pour toutes les lignes véhicules.
+ */
+const CATEGORIES_VEHICULE = new Set(['vehicules', 'vehicule', 'vl', 'voitures', 'voiture', 'vp'])
+
+/**
+ * Colonne « jaune » de la matrice, ramenée à un index par groupe.
+ *
+ * Un dossier écrit aussi bien `{ "V1": 3 }` que `{ "vehicules": 3 }` ou un simple `3`. Prise pour un
+ * identifiant de groupe, la clé « vehicules » ne correspond à aucun groupe : `amberByGroup` devient
+ * inexploitable et le jaune du dossier disparaît du calcul des inter-verts (§14.3), remplacé sans un mot
+ * par le jaune par défaut du contrôleur.
+ *
+ * Les valeurs nommément portées par un groupe l'emportent sur la valeur de catégorie : le dossier qui
+ * précise une ligne l'a fait exprès.
+ */
+function valeursParGroupe(
+  valeur: unknown,
+  quoi: string,
+  groupesVehicules: string[],
+  groupesConnus: Set<string>,
+  reservees: Set<string>,
+  avertissements: string[],
+): Record<string, number> {
+  const out: Record<string, number> = {}
+  const appliquerACategorie = (n: number, libelle: string): void => {
+    if (!groupesVehicules.length) {
+      avertissements.push(`${quoi} : la valeur ${libelle} vaut pour la catégorie « véhicules », mais le dossier ne déclare aucun groupe véhicule ; elle est ignorée.`)
+      return
+    }
+    for (const g of groupesVehicules) out[g] = n
+    avertissements.push(`${quoi} : la valeur ${libelle} désigne une catégorie et non un groupe ; elle est appliquée aux ${groupesVehicules.length} groupe(s) véhicule (${groupesVehicules.join(', ')}).`)
+  }
+  const scalaire = typeof valeur === 'number' || typeof valeur === 'string' ? nombre(valeur) : null
+  if (scalaire !== null) {
+    if (scalaire > 0) appliquerACategorie(scalaire, `${scalaire} s, donnée seule`)
+    return out
+  }
+  if (!estObjet(valeur)) return out
+  const inconnues: string[] = []
+  const nommees: [string, number][] = []
+  for (const [cle, v] of Object.entries(valeur)) {
+    if (cleReservee(cle)) { reservees.add(cle); continue }
+    const n = nombre(v)
+    if (n === null || n <= 0) continue
+    if (groupesConnus.has(cle)) { nommees.push([cle, n]); continue }
+    if (CATEGORIES_VEHICULE.has(normaliserTexte(cle).replace(/ /g, ''))) appliquerACategorie(n, `« ${cle} » (${n} s)`)
+    else inconnues.push(cle)
+  }
+  // Après les catégories : une ligne nommée dans le dossier prime sur la valeur commune.
+  for (const [g, n] of nommees) out[g] = n
+  if (inconnues.length) {
+    avertissements.push(`${quoi} : clé(s) ${inconnues.map((k) => `« ${k} »`).join(', ')} sans correspondance, ni groupe du dossier ni catégorie de groupes ; valeur(s) ignorée(s).`)
+  }
+  return out
+}
+
 /** Matrice lue : ses lignes (groupe qui perd le vert → colonnes) et l'objet qui porte les jaunes. */
 interface MatriceLue {
   entete: Rec
@@ -665,6 +806,18 @@ function prefixeCompatible(court: string, long: string): boolean {
   return reste === '' || !/^[0-9]/.test(reste)
 }
 
+/**
+ * Jeu de mots d'un libellé de plan, trié et dédoublonné.
+ *
+ * Un dossier nomme son plan « PF1 - STR1 » et son calendrier le cite « STR1 - PF1 » : la chaîne ordonnée
+ * ne les rapproche pas, alors qu'ils portent exactement les mêmes composants. Comparer l'ENSEMBLE des
+ * mots, séparés par tirets, espaces ou barres, retrouve le plan sans rien inventer.
+ */
+function jeuDeComposants(libelle: string): string {
+  const mots = normaliserTexte(libelle).split(' ').filter(Boolean)
+  return [...new Set(mots)].sort().join(' ')
+}
+
 /** Plan du dossier désigné par un libellé, et si le rattachement vient d'un repli plutôt que d'une égalité. */
 function resoudrePlan(
   libelle: string,
@@ -674,10 +827,54 @@ function resoudrePlan(
   if (!cle) return null
   const exact = plans.get(cle)
   if (exact) return { ...exact, repli: false }
+  // Même jeu de composants dans un autre ordre : rattachement annoncé comme un repli, jamais silencieux.
+  const jeu = jeuDeComposants(libelle)
+  if (jeu) {
+    const memesMots = [...plans.values()].filter((p) => jeuDeComposants(p.nom) === jeu)
+    // Deux plans aux mêmes mots ne se départagent pas : mieux vaut ne rien rattacher que se tromper.
+    if (memesMots.length === 1) return { ...memesMots[0], repli: true }
+  }
   for (const [cleConnue, plan] of plans) {
     if (prefixeCompatible(cle, cleConnue) || prefixeCompatible(cleConnue, cle)) return { ...plan, repli: true }
   }
   return null
+}
+
+/**
+ * Libellé de phase comparable : le préfixe « Phase » (ou « Plan ») retiré, de part et d'autre.
+ *
+ * Les dossiers nomment leurs phases « Phase A Repos » et les plans de feux les citent « A Repos ». Sans
+ * retirer ce préfixe, aucun réglage propre au plan n'est retrouvé : les mini et maxi du plan sont ignorés
+ * et le carrefour tourne sur les seules durées portées par la liste des phases — parfois nulles.
+ *
+ * L'apostrophe est conservée, contrairement au reste de la ponctuation : elle distingue « Phase A' » de
+ * « Phase A », deux phases bien différentes dans les dossiers réels.
+ */
+function cleNomPhase(nom: string): string {
+  return sansAccents(unifierPonctuation(nom).toLowerCase()).replace(/[^a-z0-9']+/g, ' ').trim()
+}
+
+function clePhase(nom: string): string {
+  return cleNomPhase(nom).replace(/^(?:phases?|plans?)\s+/, '').trim()
+}
+
+/**
+ * Nombre de mots alignés entre deux libellés de phase, `-1` s'ils sont incompatibles.
+ *
+ * Les dossiers abrègent (« B escam » pour « Phase B escamotable ») ou précisent (« B rappel » pour la
+ * phase « B ») : l'alignement mot à mot départage ces deux replis, là où une simple comparaison de
+ * préfixes rattacherait « B escam » à la phase « B » aussi bien qu'à « B escamotable ». Seul le dernier
+ * mot comparé peut être une abréviation, et jamais au point de confondre « 1 » et « 12 ».
+ */
+function alignementMots(a: string[], b: string[]): number {
+  const n = Math.min(a.length, b.length)
+  if (!n) return -1
+  for (let i = 0; i < n; i++) {
+    if (a[i] === b[i]) continue
+    if (i === n - 1 && (prefixeCompatible(a[i], b[i]) || prefixeCompatible(b[i], a[i]))) return n
+    return -1
+  }
+  return n
 }
 
 /* ----------------------------- Calendrier ----------------------------- */
@@ -1092,6 +1289,16 @@ function construireControleur(
   const groupes: SignalGroup[] = []
   const nonRattaches: string[] = []
   const voiesDeGroupes = new Map<string, string[]>()
+  // Table « référence routière → nom de voie » construite sur le dossier lui-même (§ défaut RD).
+  const references = referencesDuDossier([
+    ...listeDeChaines(c.dossier.voies ?? c.dossier.voies_plan),
+    ...c.groupes.flatMap((g) => listeDeChaines(g.voie)),
+    chaine(c.dossier.nom),
+  ])
+  /** Références rapprochées d'un nom de voie du dossier, à annoncer : c'est un repli, pas une lecture. */
+  const referencesRattachees = new Set<string>()
+  /** Groupes dont la voie n'est qu'une référence routière que rien ne permet de nommer. */
+  const referencesOrphelines = new Map<string, string>()
   let pietonApproximatif = false
   const idsDeGroupes = new Set<string>()
   for (const brut of c.groupes) {
@@ -1111,13 +1318,27 @@ function construireControleur(
       avertissements.push(`Groupe ${id} : type « ${typeDeclare} » non reconnu ; groupe traité comme ${type === 'pieton' ? 'piéton' : 'véhicule'} d'après le préfixe de son identifiant.`)
     }
     const voies = libellesDeVoies(brut.voie)
+    // Une approche désignée par sa seule référence routière ne correspond à aucun nom du réseau : on lui
+    // substitue, pour la comparaison, le nom que le dossier associe lui-même à cette référence.
+    const voiesComparables: LibelleVoie[] = []
+    for (const v of voies) {
+      if (!estReferenceRoutiere(v.noyau)) { voiesComparables.push(v); continue }
+      const nomme = references.get(v.noyau)
+      if (nomme) {
+        voiesComparables.push(nomme)
+        referencesRattachees.add(`« ${v.brut} » → « ${nomme.brut} »`)
+      } else {
+        voiesComparables.push(v)
+        referencesOrphelines.set(id, v.brut)
+      }
+    }
     const movements: MovementKey[] = []
     for (const m of mouvements) {
       const concerne = type === 'vehicule'
-        ? voies.some((v) => m.approche && memeVoie(v, m.approche))
+        ? voiesComparables.some((v) => m.approche && memeVoie(v, m.approche))
         // Faute de géométrie fiable dans le dossier, une traversée est réputée franchie par tout mouvement
         // qui entre ou sort par la voie traversée.
-        : voies.some((v) => (m.approche && memeVoie(v, m.approche)) || (m.sortie && memeVoie(v, m.sortie)))
+        : voiesComparables.some((v) => (m.approche && memeVoie(v, m.approche)) || (m.sortie && memeVoie(v, m.sortie)))
       if (concerne) movements.push(m.mouvement.key)
     }
     if (type === 'pieton' && movements.length) pietonApproximatif = true
@@ -1129,7 +1350,7 @@ function construireControleur(
     if (chaine(brut.source_voie)) {
       avertissements.push(`Groupe ${id} : la voie « ${voies.map((v) => v.brut).join(' / ') || '?'} » vient de la lecture du plan (source_voie) et reste à confirmer.`)
     }
-    for (const v of voies) {
+    for (const v of voiesComparables) {
       const liste = voiesDeGroupes.get(`${type}:${v.noyau}`)
       if (liste) liste.push(id)
       else voiesDeGroupes.set(`${type}:${v.noyau}`, [id])
@@ -1143,6 +1364,16 @@ function construireControleur(
   if (pietonApproximatif) {
     avertissements.push('Traversées piétonnes : les mouvements interdits ont été déduits du nom de la voie traversée (entrée ou sortie), le dossier ne donnant pas la géométrie des traversées.')
   }
+  if (referencesRattachees.size) {
+    avertissements.push(`Référence(s) routière(s) rapprochée(s) d'un nom de voie d'après les libellés du dossier : ${[...referencesRattachees].join(', ')} ; le réseau ne conservant pas les numéros de route, ce rapprochement est à vérifier.`)
+  }
+  // Cause exacte, plutôt que le message générique : un groupe dont la voie n'est qu'un numéro de route
+  // n'a rien à voir avec la géométrie approximative des traversées piétonnes, et l'envoyer sur cette
+  // piste ferait chercher un défaut là où il n'y en a pas.
+  const orphelines = [...referencesOrphelines].filter(([g]) => nonRattaches.includes(g))
+  if (orphelines.length) {
+    avertissements.push(`Groupe(s) ${orphelines.map(([g, r]) => `${g} (voie « ${r} »)`).join(', ')} : la voie n'est désignée que par sa référence routière. Le réseau ne retient que le nom des voies, et le dossier n'associe cette référence à aucun nom (aucun libellé de la forme « Avenue … (D1082) ») : ces groupes restent sans mouvement tant que l'exploitant n'a pas nommé la voie.`)
+  }
   if (nonRattaches.length) {
     avertissements.push(`${nonRattaches.length} groupe(s) sans mouvement au carrefour : ${nonRattaches.join(', ')}.`)
   }
@@ -1152,6 +1383,10 @@ function construireControleur(
   /* --- Phases --- */
   const phases: SignalPhase[] = []
   const idParNom = new Map<string, string>()
+  /** Même index, le préfixe « Phase » retiré : c'est sous cette forme que les plans citent les phases. */
+  const idParNomCourt = new Map<string, string>()
+  /** Libellés courts que deux phases se partagent : impossibles à départager, donc jamais rattachés. */
+  const nomsCourtsAmbigus = new Set<string>()
   const idParLettre = new Map<string, string>()
   /** Plan propre à une phase : libellé du dossier et forme comparable, pour parler à l'exploitant. */
   const planDeLaPhase = new Map<string, { brut: string; cle: string }>()
@@ -1203,9 +1438,12 @@ function construireControleur(
     }
     if (retenus.length) phase.groups = retenus
     phases.push(phase)
-    const cle = normaliserTexte(nom)
+    const cle = cleNomPhase(nom)
     if (cle && !idParNom.has(cle)) idParNom.set(cle, idPhase)
     else if (cle) avertissements.push(`Deux phases portent le même nom « ${nom} » : la seconde ne pourra pas être référencée par un plan.`)
+    const court = clePhase(nom)
+    if (court && !idParNomCourt.has(court)) idParNomCourt.set(court, idPhase)
+    else if (court && idParNomCourt.get(court) !== idPhase) nomsCourtsAmbigus.add(court)
     const lettre = /\bphase\s+([a-z0-9]+)\b/.exec(cle)?.[1] ?? (/^[a-z0-9]$/.test(cle) ? cle : '')
     if (lettre) {
       if (idParLettre.has(lettre)) idParLettre.set(lettre, '')
@@ -1215,20 +1453,37 @@ function construireControleur(
     if (planPropre) planDeLaPhase.set(idPhase, { brut: planPropre, cle: clePlan(planPropre) })
   })
   if (!phases.length) avertissements.push('Le dossier ne décrit aucune phase : le contrôleur reste sans plan.')
+  for (const court of nomsCourtsAmbigus) {
+    const nomsEnCause = phases.filter((p) => clePhase(p.name) === court).map((p) => `« ${p.name} »`).join(', ')
+    avertissements.push(`Phases ${nomsEnCause} : leurs noms sont indiscernables une fois le préfixe « Phase » retiré ; un plan qui les cite ne pourra pas les départager, leurs réglages propres au plan sont ignorés.`)
+  }
 
   const resoudrePhase = (libelle: string): string | null => {
-    const cle = normaliserTexte(libelle)
+    const cle = cleNomPhase(libelle)
     if (!cle) return null
-    const direct = idParNom.get(cle)
+    const court = clePhase(libelle)
+    // Le préfixe « Phase » est retiré des deux côtés : « A Repos » retrouve « Phase A Repos ».
+    const direct = idParNom.get(cle) ?? (nomsCourtsAmbigus.has(court) ? undefined : idParNomCourt.get(court))
     if (direct) return direct
     const lettre = /\bphase\s+([a-z0-9]+)\b/.exec(cle)?.[1] ?? (/^[a-z0-9]$/.test(cle) ? cle : '')
     if (lettre) {
       const parLettre = idParLettre.get(lettre)
       if (parLettre) return parLettre
     }
-    // Même réserve que pour les plans : « Phase 12 » ne doit pas se rattacher à « Phase 1 ».
-    for (const [nom, id] of idParNom) if (prefixeCompatible(cle, nom) || prefixeCompatible(nom, cle)) return id
-    return null
+    // Repli mot à mot sur les libellés courts. Même réserve que pour les plans : « Phase 12 » ne doit
+    // pas se rattacher à « Phase 1 », et deux phases également proches ne se départagent pas.
+    const mots = court.split(' ').filter(Boolean)
+    let meilleur: string | null = null
+    let meilleurScore = 0
+    let exAequo = false
+    for (const [nomCourt, id] of idParNomCourt) {
+      if (nomsCourtsAmbigus.has(nomCourt)) continue
+      const score = alignementMots(mots, nomCourt.split(' '))
+      if (score <= 0) continue
+      if (score > meilleurScore) { meilleurScore = score; meilleur = id; exAequo = false }
+      else if (score === meilleurScore && id !== meilleur) exAequo = true
+    }
+    return meilleur && !exAequo ? meilleur : null
   }
 
   /* --- Plans de feux --- */
@@ -1244,7 +1499,7 @@ function construireControleur(
       const libelle = chaine(phaseBrute.nom) || chaine(phaseBrute.phase) || chaine(phaseBrute.id)
       const idPhase = resoudrePhase(libelle)
       if (!idPhase) {
-        avertissements.push(`Plan « ${nom} » : phase « ${libelle || '?'} » absente de la liste des phases, réglage ignoré.`)
+        avertissements.push(`Plan « ${nom} » : phase « ${libelle || '?'} » introuvable dans la liste des phases du dossier, réglage ignoré ; la phase garde les durées portées par la liste des phases.`)
         continue
       }
       const { mini, maxi } = bornesDeVert(
@@ -1364,12 +1619,17 @@ function construireControleur(
     if (inconnus.size) {
       avertissements.push(`Matrice d'inter-verts : groupe(s) absent(s) de la liste des groupes (${[...inconnus].join(', ')}).`)
     }
-    const jaunes = estObjet(matrice.entete.valeur_jaune_s) ? matrice.entete.valeur_jaune_s : {}
-    for (const [g, v] of Object.entries(jaunes)) {
-      if (cleReservee(g)) { reservees.add(g); continue }
-      const n = nombre(v)
-      if (n !== null && n > 0) amberByGroup[g] = n
-    }
+    // `valeur_securite_s` n'est pas repris : le modèle tire les temps de sécurité de la matrice elle-même
+    // (§14.3), la colonne de droite ne changerait aucun résultat.
+    const jaunes = valeursParGroupe(
+      matrice.entete.valeur_jaune_s,
+      `Matrice d'inter-verts, valeur de jaune`,
+      groupes.filter((g) => g.type === 'vehicule').map((g) => g.id),
+      groupesConnus,
+      reservees,
+      avertissements,
+    )
+    for (const [g, n] of Object.entries(jaunes)) amberByGroup[g] = n
     if (reservees.size) {
       avertissements.push(`Matrice d'inter-verts : clé(s) ${[...reservees].map((k) => `« ${k} »`).join(', ')} écartée(s), ces noms sont réservés par le langage et ne peuvent pas désigner un groupe.`)
     }

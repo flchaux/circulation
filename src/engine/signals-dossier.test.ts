@@ -8,7 +8,7 @@ import type { Demand, NetEdge, NetNode, Network, SignalController, SignalPhase, 
 import { DEFAULT_SETTINGS } from '@/model/defaults'
 import { buildGraph } from './routing'
 import type { SignalClock, SignalProbe } from './signals'
-import { SIG_AMBER, SIG_GREEN_PROTECTED, SIG_RED, SignalEngine } from './signals'
+import { SIG_AMBER, SIG_GREEN_PERMITTED, SIG_GREEN_PROTECTED, SIG_RED, SignalEngine } from './signals'
 import { Simulation } from './simulation'
 
 /* ----------------------------- Fabriques ----------------------------- */
@@ -44,6 +44,17 @@ function cross(controller: SignalController): Network {
     controls: { c: { nodeId: 'c', type: 'signals', controllerId: controller.id } },
     controllers: { [controller.id]: controller },
   }
+}
+
+/**
+ * Interdit les mouvements que le plan ne dessert pas, pour que le courant opposé est → ouest s'écoule au
+ * lieu de rester bloqué derrière un véhicule qui attend un vert qui ne vient jamais.
+ */
+function courantOppose(net: Network): Network {
+  const edges = { ...net.edges }
+  edges.e_in = { ...edges.e_in, bannedTo: ['n_out', 's_out'] }
+  edges.w_in = { ...edges.w_in, bannedTo: ['s_out'] }
+  return { ...net, edges }
 }
 
 function phase(id: string, name: string, green: number, o: Partial<SignalPhase> = {}): SignalPhase {
@@ -177,11 +188,12 @@ describe('inter-verts issus du dossier', () => {
     }
     // Le vert n'ayant jamais été interrompu, le temps perdu au démarrage n'est pas réappliqué.
     expect(h.since('w_in>e_out')).toBe(0)
-    // Le tourne-à-gauche, lui, se ferme dès que le vert piéton s'ouvre en p2.
+    // Le tourne-à-gauche, lui, perd sa protection dès que le vert piéton s'ouvre en p2 : il reste vert et
+    // cède aux piétons (§14.5), il ne se ferme pas.
     h.at(9)
     expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PROTECTED)
     h.at(10)
-    expect(h.state('w_in>n_out')).toBe(SIG_RED)
+    expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PERMITTED)
   })
 })
 
@@ -398,19 +410,38 @@ describe('verts piétons', () => {
     })
   }
 
-  it('ferme le mouvement sécant pendant la phase piétonne', () => {
+  it('met le mouvement sécant en vert permis pendant la phase piétonne, sans le fermer', () => {
     const h = harness(cross(controllerAvecPieton(true)))
     h.at(10)
     expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PROTECTED)
     h.at(25)
-    // Vert piéton : le tourne-à-gauche est rouge alors que l'axe est-ouest reste vert.
-    expect(h.state('w_in>n_out')).toBe(SIG_RED)
+    // Vert piéton : le tourne-à-gauche cède le passage (vert permis), l'axe est-ouest reste protégé.
+    expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PERMITTED)
     expect(h.state('w_in>e_out')).toBe(SIG_GREEN_PROTECTED)
   })
 
-  it('garde le mouvement rouvert au rouge pendant tout le dégagement de la traversée', () => {
+  it('compte le mouvement permis par un vert piéton dans la part de vert de son approche', () => {
+    // Approche ouest : sans ce comptage, une approche dont tous les mouvements franchissent une traversée
+    // afficherait une part de vert nulle, donc une saturation infinie sur une approche qui roule.
+    const seulementLeTourneAGauche = { id: 'V1', type: 'vehicule' as const, movements: ['w_in>n_out'] }
+    const controller = dossier({
+      phases: [
+        phase('p1', 'Est-ouest + traversée', 20, { groups: ['V1', 'P1'] }),
+        phase('p2', 'Nord-sud', 20, { groups: ['V2'] }),
+      ],
+      groups: [seulementLeTourneAGauche, V2, P1],
+      interGreen: { V1: { V2: 6 }, P1: { V2: 6 }, V2: { V1: 6 } },
+      amberByGroup: { V1: 3, V2: 3 },
+    })
+    const h = harness(cross(controller))
+    // Cycle 20 + 6 + 20 + 6 = 52 s, dont 20 s de vert pour l'approche ouest.
+    expect(h.share('w_in')).toBeCloseTo(20 / 52, 6)
+  })
+
+  it('retarde le vert protégé de tout le dégagement de la traversée', () => {
     // Sous-phase piétonne : la traversée s'éteint alors que l'axe est-ouest reste vert. Sans dégagement, le
-    // tourne-à-gauche qu'elle fermait repasserait au vert la seconde suivante — défaut de sécurité.
+    // tourne-à-gauche qui lui cédait reprendrait sa protection la seconde suivante — défaut de sécurité,
+    // des piétons étant encore engagés sur la chaussée.
     const controller = dossier({
       phases: [
         phase('p1', 'Est-ouest + traversée', 20, { groups: ['V1', 'P1'] }),
@@ -421,37 +452,55 @@ describe('verts piétons', () => {
     })
     const h = harness(cross(controller))
     h.at(19)
-    expect(h.state('w_in>n_out')).toBe(SIG_RED) // vert piéton : le tourne-à-gauche est fermé
+    expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PERMITTED) // vert piéton : le tourne-à-gauche cède
     for (let t = 20; t < 29; t++) {
       h.at(t)
-      expect(h.state('w_in>n_out'), `t=${t}`).toBe(SIG_RED) // 9 s de dégagement
+      // 9 s de dégagement : le conducteur continue de céder, il ne reprend pas la priorité.
+      expect(h.state('w_in>n_out'), `t=${t}`).toBe(SIG_GREEN_PERMITTED)
       expect(h.state('w_in>e_out'), `t=${t}`).toBe(SIG_GREEN_PROTECTED) // l'axe, lui, n'est pas coupé
     }
     h.at(29)
     expect(h.state('w_in>n_out')).toBe(SIG_GREEN_PROTECTED)
   })
 
-  it('réduit mesurablement le débit du carrefour', () => {
-    // Même cycle (72 s) dans les deux variantes : seul le vert piéton change.
-    const flow = (pieton: boolean): { sortis: number; file: number } => {
-      const sim = new Simulation({
-        network: cross(controllerAvecPieton(pieton)),
-        demand: demandOf({ w: 800 }, { n: 1 }),
-        settings: settingsOf(),
-      })
-      let guard = 200_000
-      while (!sim.done && guard-- > 0) sim.step(200)
-      expect(sim.done).toBe(true)
-      const r = sim.results()
-      return { sortis: r.exits.n.count, file: r.edges.w_in.maxQueue }
-    }
-    const sans = flow(false)
-    const avec = flow(true)
-    expect(sans.sortis).toBeGreaterThan(200)
-    expect(avec.sortis).toBeGreaterThan(0)
-    // Le mouvement ne dispose plus que d'une phase verte sur deux : le débit chute nettement.
-    expect(avec.sortis).toBeLessThan(sans.sortis * 0.75)
-    expect(avec.file).toBeGreaterThanOrEqual(sans.file)
+  /** Débit vers le nord et file maximale sur l'approche ouest, à cycle constant (72 s). */
+  function flow(network: Network, demand: Demand): { sortis: number; file: number } {
+    const sim = new Simulation({ network, demand, settings: settingsOf() })
+    let guard = 200_000
+    while (!sim.done && guard-- > 0) sim.step(200)
+    expect(sim.done).toBe(true)
+    const r = sim.results()
+    return { sortis: r.exits.n.count, file: r.edges.w_in.maxQueue }
+  }
+
+  it('laisse écouler le tourne-à-gauche qui cède aux piétons au lieu de le bloquer', () => {
+    // Même carrefour, mêmes phases, même cycle (72 s) : seule la concomitance du vert piéton change.
+    // Chiffres de référence (800 véh/h ouest → nord, 20 min) : 250 véhicules sortis sans traversée,
+    // 248 avec la traversée verte en concomitance. Le modèle précédent, qui fermait le mouvement, n'en
+    // laissait sortir que 144 : un tiers du cycle perdu pour une traversée que les véhicules peuvent
+    // franchir en cédant.
+    const demande = demandOf({ w: 800 }, { n: 1 })
+    const sans = flow(cross(controllerAvecPieton(false)), demande)
+    const avec = flow(cross(controllerAvecPieton(true)), demande)
+    expect(sans.sortis).toBeGreaterThan(240)
+    // Le seuil discrimine les deux modèles : la fermeture n'en laissait passer que 144.
+    expect(avec.sortis).toBeGreaterThan(200)
+    // Le vert piéton coûte peu ici, et c'est la limite assumée du modèle : la cession est calculée sur les
+    // flux véhicules en conflit, or le conflit est piéton et la demande piétonne n'est pas simulée.
+    expect(avec.sortis).toBeGreaterThan(sans.sortis * 0.95)
+    expect(avec.sortis).toBeLessThanOrEqual(sans.sortis)
+  })
+
+  it('fait bel et bien céder le mouvement permis aux véhicules en conflit', () => {
+    // Le vert permis n'est pas un vert franc : avec 800 véh/h en face (est → ouest, tout droit), le
+    // tourne-à-gauche ouest → nord tombe de 283 à 191 véhicules sortis. La cession n'est optimiste que
+    // faute de piétons simulés, pas faute de modèle.
+    const demande = demandOf({ w: 800, e: 800 }, { n: 0.5, w: 0.5 })
+    const sans = flow(courantOppose(cross(controllerAvecPieton(false))), demande)
+    const avec = flow(courantOppose(cross(controllerAvecPieton(true))), demande)
+    expect(sans.sortis).toBeGreaterThan(270)
+    expect(avec.sortis).toBeLessThan(sans.sortis * 0.8) // la cession coûte du débit…
+    expect(avec.sortis).toBeGreaterThan(160) // … mais bien moins que la fermeture, qui plafonnait à 144
   })
 })
 
@@ -475,13 +524,16 @@ describe('rappel piéton', () => {
     })
   }
 
-  /** Cycle de 72 s ; à t ≡ 30 s la sous-phase piétonne est en cours, le tourne-à-gauche est donc fermé. */
+  /**
+   * Cycle de 72 s ; à t ≡ 30 s la sous-phase piétonne est en cours. La traversée desservie se reconnaît au
+   * vert permis du tourne-à-gauche, qui lui cède le passage ; non desservie, il garde sa protection.
+   */
   function cyclesServis(controller: SignalController, clock?: SignalClock, cycles = 40): number {
     const h = harness(cross(controller), clock)
     let servis = 0
     for (let t = 0; t < cycles * 72; t++) {
       h.at(t)
-      if (t % 72 === 30 && h.state('w_in>n_out') === SIG_RED) servis++
+      if (t % 72 === 30 && h.state('w_in>n_out') === SIG_GREEN_PERMITTED) servis++
     }
     return servis
   }
@@ -506,16 +558,19 @@ describe('rappel piéton', () => {
     const part = (pedestrianCallShare: number): number =>
       cyclesServis(c, { startTimeOfDayMin: 8 * 60, dayOfWeek: 2, seed: 2026, pedestrianCallShare })
     expect(part(1)).toBe(40) // appelée à chaque cycle : équivalent d'un rappel
-    expect(part(0)).toBe(0) // jamais appelée : la traversée ne s'ouvre pas
+    expect(part(0)).toBe(0) // jamais appelée : la traversée ne s'ouvre pas, le tourne-à-gauche reste protégé
   })
 
   it('change le débit du carrefour, à plan de feux identique', () => {
-    // Deux simulations qui ne diffèrent que par `recall` : sans rappel, la traversée n'est desservie qu'une
-    // partie des cycles et le tourne-à-gauche ouest → nord écoule davantage.
+    // Deux simulations qui ne diffèrent que par `recall`. Il faut un courant opposé pour que la différence
+    // se voie : un mouvement permis sans conflit véhicule s'écoule presque comme un mouvement protégé
+    // (limite assumée, voir `phaseMovements`). Avec 800 véh/h en face, le tourne-à-gauche ouest → nord
+    // sort 191 véhicules quand la traversée est en rappel et 256 quand elle est sur bouton poussoir,
+    // desservie un cycle sur deux.
     const sortis = (recall: boolean): number => {
       const sim = new Simulation({
-        network: cross(controllerAvecTraversee(recall)),
-        demand: demandOf({ w: 600 }, { n: 1 }),
+        network: courantOppose(cross(controllerAvecTraversee(recall))),
+        demand: demandOf({ w: 800, e: 800 }, { n: 0.5, w: 0.5 }),
         settings: settingsOf(),
       })
       let guard = 200_000
@@ -526,7 +581,7 @@ describe('rappel piéton', () => {
     const enRappel = sortis(true)
     const surAppel = sortis(false)
     expect(enRappel).toBeGreaterThan(0)
-    expect(surAppel).toBeGreaterThan(enRappel)
+    expect(surAppel).toBeGreaterThan(enRappel * 1.2)
   })
 })
 

@@ -19,7 +19,8 @@ import {
 /*  Réseau de test : quatre carrefours nommés comme à Veauche          */
 /* ------------------------------------------------------------------ */
 
-function reseauDeTest(): Network {
+/** Constructeur de réseau minimal, partagé par les réseaux de test. */
+function constructeurReseau() {
   const nodes: Record<NodeId, NetNode> = {}
   const edges: Record<string, NetEdge> = {}
   const noeud = (id: string, x: number, y: number, boundary = false) => { nodes[id] = { id, x, y, boundary } }
@@ -44,6 +45,12 @@ function reseauDeTest(): Network {
     edges[`${a}_${b}`] = tronçon(a, b, `${b}_${a}`)
     edges[`${b}_${a}`] = tronçon(b, a, `${a}_${b}`)
   }
+  const reseau = (): Network => ({ nodes, edges, controls: {}, controllers: {} })
+  return { noeud, branche, reseau }
+}
+
+function reseauDeTest(): Network {
+  const { noeud, branche, reseau } = constructeurReseau()
 
   // Avenue de la Libération d'ouest en est, coupée par la Croix de Borne puis par Jourcey.
   noeud('w', -200, 0, true)
@@ -78,7 +85,39 @@ function reseauDeTest(): Network {
   branche('sPagnol', 'cPagnol', 'Rue Marcel Pagnol')
   branche('eBonnet', 'cPagnol', 'Route de Saint-Bonnet-les-Oules')
 
-  return { nodes, edges, controls: {}, controllers: {} }
+  return reseau()
+}
+
+/**
+ * Réseau écrit comme OSM l'écrit à Veauche : « Rue du Docteur Masourenok » (sans prénom), « Rue de la
+ * Croix Borne » (sans « de »), apostrophe typographique. Un second carrefour porte la « Croix des Pères »,
+ * la voie à ne surtout pas confondre avec la « Croix de Borne ».
+ */
+function reseauEcritureOsm(): Network {
+  const { noeud, branche, reseau } = constructeurReseau()
+  noeud('c', 0, 0)
+  noeud('wGaulle', -300, 0, true)
+  noeud('eGaulle', 300, 0)
+  noeud('nMaso', 0, 250, true)
+  noeud('sBorne', 0, -250, true)
+  branche('wGaulle', 'c', 'Avenue du Général de Gaulle')
+  branche('eGaulle', 'c', 'Avenue du Général de Gaulle')
+  branche('nMaso', 'c', 'Rue du Docteur Masourenok')
+  branche('sBorne', 'c', 'Rue de la Croix Borne')
+
+  noeud('nPeres', 300, 250, true)
+  noeud('sPeres', 300, -250, true)
+  branche('nPeres', 'eGaulle', 'Rue de la Croix des Pères')
+  branche('sPeres', 'eGaulle', 'Rue de la Croix des Pères')
+
+  noeud('cEurope', 0, 900)
+  noeud('wEurope', -300, 900, true)
+  noeud('eEurope', 300, 900, true)
+  noeud('nStade', 0, 1150, true)
+  branche('wEurope', 'cEurope', 'Place de l\u2019Europe')
+  branche('eEurope', 'cEurope', 'Place de l\u2019Europe')
+  branche('nStade', 'cEurope', 'Rue du Stade')
+  return reseau()
 }
 
 /* ------------------------------------------------------------------ */
@@ -338,15 +377,15 @@ describe('import d’une fixture à deux carrefours', () => {
   })
 
   it('produit un contrôleur cohérent pour la validation du modèle', () => {
-    // Seul reproche possible ici : les tourne-à-droite et tourne-à-gauche restent fermés tout le cycle,
-    // conséquence directe de la règle « un vert piéton interdit les mouvements sécants » (§14.5) appliquée
-    // à un carrefour dont les deux traversées sont vertes à chaque cycle. Aucun conflit protégé,
-    // aucun mouvement orphelin, aucune durée aberrante ne doit apparaître.
+    // Seul reproche possible ici : les tourne-à-droite et tourne-à-gauche sont verts en même temps que la
+    // traversée qu'ils franchissent, donc en cession (§14.5) — leur capacité simulée est optimiste, faute
+    // de demande piétonne au dossier. Ils ne sont plus fermés : ce serait un rouge permanent, donc une
+    // approche bloquée. Aucun conflit protégé, aucun mouvement orphelin, aucune durée aberrante.
     const anomalies5 = validateController(reseau, c5)
     expect(anomalies5).toHaveLength(1)
-    expect(anomalies5[0]).toMatch(/fermé\(s\) par un vert piéton/)
+    expect(anomalies5[0]).toMatch(/capacité simulée est optimiste/)
     const anomalies6 = validateController(reseau, c6)
-    expect(anomalies6.every((a) => /fermé\(s\) par un vert piéton/.test(a))).toBe(true)
+    expect(anomalies6.every((a) => /capacité simulée est optimiste/.test(a))).toBe(true)
   })
 
   it('reste en mode fixe sans mention d’escamotage', () => {
@@ -935,5 +974,324 @@ describe('détails du calendrier et des durées', () => {
     const message = res.matches[0].avertissements.find((a) => /n'appartient qu'au plan/.test(a))!
     expect(message).toContain('« PF3 »')
     expect(message).not.toContain('pf3')
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  Défauts relevés sur le vrai fichier de la commune                  */
+/* ------------------------------------------------------------------ */
+
+describe('noms de phase cités par les plans de feux', () => {
+  /**
+   * Forme de la Place de l'Europe : les phases ne portent AUCUNE durée, tout vient des plans, qui les
+   * citent sans le préfixe « Phase ». Non résolus, les trois plans retombent sur les durées par défaut
+   * et deviennent indiscernables : le carrefour perd la différence entre pointe et heure creuse.
+   */
+  function sansDureeDePhase(): Record<string, unknown> {
+    return {
+      id: 'EUROPE',
+      nom: "Place de l'Europe",
+      voies: ["Place de l'Europe", 'Rue du Stade'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: "Place de l'Europe" },
+        { id: 'V2', type: 'vehicule', voie: 'Rue du Stade' },
+      ],
+      phases: [
+        { nom: 'Phase A', vehicules: ['V1'] },
+        { nom: 'Phase B', vehicules: ['V2'] },
+      ],
+      plans_de_feux: [
+        { nom: 'HPM', cycle_s: 100, phases: [{ nom: 'A', mini_s: 10, maxi_s: 31 }, { nom: 'B rappel', mini_s: 7, maxi_s: 24 }] },
+        { nom: 'HC', cycle_s: 90, phases: [{ nom: 'A', mini_s: 12, maxi_s: 36 }, { nom: 'B rappel', mini_s: 7, maxi_s: 21 }] },
+      ],
+    }
+  }
+
+  it('retrouve « A Repos » derrière « Phase A Repos » et applique les mini/maxi du plan', () => {
+    const res = importDossiersFeux(fichier(sansDureeDePhase()), { network: reseauEcritureOsm() })
+    const match = res.matches[0]
+    expect(match.nodeId).not.toBeNull()
+    expect(match.avertissements.some((a) => /introuvable dans la liste des phases/.test(a))).toBe(false)
+    const c = Object.values(res.controllers)[0]
+    const [hpm, hc] = c.plans!
+    // Sans la résolution, les deux plans porteraient les mêmes durées par défaut.
+    expect(hpm.phases[c.phases[0].id].maxGreen).toBe(31)
+    expect(hc.phases[c.phases[0].id].maxGreen).toBe(36)
+    expect(hpm.phases[c.phases[0].id].minGreen).toBe(10)
+    expect(hc.phases[c.phases[0].id].minGreen).toBe(12)
+    // « B rappel » précise la phase « B » : le repli mot à mot la retrouve.
+    expect(hpm.phases[c.phases[1].id].maxGreen).toBe(24)
+    expect(hc.phases[c.phases[1].id].maxGreen).toBe(21)
+  })
+
+  it('préfère « Phase B escamotable » à « Phase B » quand le plan cite « B escam »', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE00X',
+      nom: 'Jourcey / Libération',
+      voies: ['Avenue de la Libération', 'Rue de Jourcey'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
+        { id: 'V2', type: 'vehicule', voie: 'Rue de Jourcey' },
+      ],
+      phases: [
+        { nom: 'Phase A Repos', vehicules: ['V1'], mini_s: 10, maxi_s: 40 },
+        { nom: 'Phase B', vehicules: ['V2'], mini_s: 5, maxi_s: 9 },
+        { nom: 'Phase B escamotable', plan: 'PFN', vehicules: ['V2'], mini_s: 8, maxi_s: 15 },
+      ],
+      plans_de_feux: [{ nom: 'PFN', cycle_s: 67, phases: [{ nom: 'A Repos', mini_s: 10, maxi_s: 40 }, { nom: 'B escam', mini_s: 8, maxi_s: 22 }] }],
+    }), opts)
+    const c = Object.values(res.controllers)[0]
+    const escamotable = c.phases.find((p) => p.name === 'Phase B escamotable')!
+    const simple = c.phases.find((p) => p.name === 'Phase B')!
+    const plan = c.plans![0]
+    expect(plan.phases[escamotable.id].maxGreen).toBe(22)
+    // La phase « B », propre à aucun plan, reste ouverte avec ses propres durées : le réglage « B escam »
+    // ne doit pas lui être appliqué.
+    expect(plan.phases[simple.id].maxGreen).toBe(9)
+  })
+
+  it('ne rattache toujours pas « Phase 12 » à « Phase 1 »', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE00Y',
+      nom: 'Jourcey / Libération',
+      voies: ['Avenue de la Libération', 'Rue de Jourcey'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
+        { id: 'V2', type: 'vehicule', voie: 'Rue de Jourcey' },
+      ],
+      phases: [
+        { nom: 'Phase 1 Repos', vehicules: ['V1'], mini_s: 10, maxi_s: 40 },
+        { nom: 'Phase 2', vehicules: ['V2'], mini_s: 5, maxi_s: 9 },
+      ],
+      plans_de_feux: [{ nom: 'PF1', cycle_s: 67, phases: [{ nom: 'Phase 12', mini_s: 30, maxi_s: 30 }, { nom: '1 Repos', mini_s: 11, maxi_s: 41 }] }],
+    }), opts)
+    const avertissements = res.matches[0].avertissements
+    expect(avertissements.some((a) => /« Phase 12 »/.test(a) && /introuvable/.test(a))).toBe(true)
+    const c = Object.values(res.controllers)[0]
+    // La citation « 1 Repos », elle, désigne bien « Phase 1 Repos » : le préfixe retiré des deux côtés suffit.
+    expect(c.plans![0].phases[c.phases[0].id].maxGreen).toBe(41)
+  })
+
+  it('distingue « Phase A’ escamotable » de « Phase A escamotable » malgré l’apostrophe', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE00Z',
+      nom: 'Jourcey / Libération',
+      voies: ['Avenue de la Libération', 'Rue de Jourcey'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
+        { id: 'V2', type: 'vehicule', voie: 'Rue de Jourcey' },
+      ],
+      phases: [
+        { nom: 'Phase A\u2019 escamotable', vehicules: ['V1'], mini_s: 5, maxi_s: 9 },
+        { nom: 'Phase A escamotable', vehicules: ['V2'], mini_s: 5, maxi_s: 9 },
+      ],
+      plans_de_feux: [{
+        nom: 'PF1',
+        cycle_s: 80,
+        phases: [{ nom: "A' escam", mini_s: 6, maxi_s: 12 }, { nom: 'A escam', mini_s: 7, maxi_s: 30 }],
+      }],
+    }), opts)
+    const c = Object.values(res.controllers)[0]
+    expect(c.plans![0].phases[c.phases[0].id].maxGreen).toBe(12)
+    expect(c.plans![0].phases[c.phases[1].id].maxGreen).toBe(30)
+    // Ces deux noms sont bien distincts : aucun avertissement d'homonymie ne doit être émis.
+    expect(res.matches[0].avertissements.some((a) => /indiscernables|le même nom/.test(a))).toBe(false)
+  })
+})
+
+describe('plans cités par le calendrier dans un autre ordre', () => {
+  function deuxPlansComposes(nomsCalendrier: [string, string]): Record<string, unknown> {
+    return {
+      id: 'VE004',
+      nom: 'Marcel Pagnol / Saint-Bonnet',
+      voies: ['Rue Marcel Pagnol', 'Route de Saint-Bonnet-les-Oules'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Rue Marcel Pagnol' },
+        { id: 'V2', type: 'vehicule', voie: 'Route de Saint-Bonnet-les-Oules' },
+      ],
+      phases: [
+        { nom: 'Phase A', vehicules: ['V1'], mini_s: 10, maxi_s: 25 },
+        { nom: 'Phase B', vehicules: ['V2'], mini_s: 10, maxi_s: 32 },
+      ],
+      plans_de_feux: [
+        { nom: 'PF1 - STR1', cycle_s: 94, phases: [{ nom: 'A', mini_s: 10, maxi_s: 25 }, { nom: 'B', mini_s: 10, maxi_s: 32 }] },
+        { nom: 'PF2 - STR2', cycle_s: 91, phases: [{ nom: 'A', mini_s: 10, maxi_s: 40 }, { nom: 'B', mini_s: 10, maxi_s: 32 }] },
+      ],
+      calendrier: {
+        lundi_a_vendredi: [
+          { plage: '06h30 - 09h00', plan: nomsCalendrier[0] },
+          { plage: '09h00 - 15h30', plan: nomsCalendrier[1] },
+        ],
+      },
+    }
+  }
+
+  it('reconnaît « STR1 - PF1 » comme le plan « PF1 - STR1 » et l’annonce comme un repli', () => {
+    const res = importDossiersFeux(fichier(deuxPlansComposes(['STR1 - PF1', 'STR2 - PF2'])), opts)
+    const c = Object.values(res.controllers)[0]
+    expect(c.schedule).toHaveLength(2)
+    expect(c.schedule![0].planId).toBe(c.plans![0].id)
+    expect(c.schedule![1].planId).toBe(c.plans![1].id)
+    const avertissements = res.matches[0].avertissements
+    expect(avertissements.some((a) => /plan « STR1 - PF1 » inconnu/.test(a))).toBe(false)
+    expect(avertissements.some((a) => /« STR1 - PF1 » → « PF1 - STR1 »/.test(a) && /repli|rapprochement/.test(a))).toBe(true)
+  })
+
+  it('garde l’égalité stricte silencieuse', () => {
+    const res = importDossiersFeux(fichier(deuxPlansComposes(['PF1 - STR1', 'PF2 - STR2'])), opts)
+    expect(res.matches[0].avertissements.some((a) => /rapprochement de libellés/.test(a))).toBe(false)
+  })
+
+  it('refuse de trancher entre deux plans qui portent les mêmes mots', () => {
+    // Deux plans du même jeu de mots ne se départagent pas : rattacher l'un des deux au hasard donnerait
+    // au carrefour un cycle et des verts qui ne sont pas les siens, sans que rien ne le signale.
+    const dossier = deuxPlansComposes(['STR1 - HPM - PF1', 'PF2 - STR2'])
+    const plans = dossier.plans_de_feux as Record<string, unknown>[]
+    plans[0].nom = 'PF1 - STR1 - HPM'
+    plans[1].nom = 'HPM - PF1 - STR1'
+    const res = importDossiersFeux(fichier(dossier), opts)
+    expect(res.matches[0].avertissements.some((a) => /plan « STR1 - HPM - PF1 » inconnu/.test(a))).toBe(true)
+  })
+})
+
+describe('colonne « jaune » donnée par catégorie de groupes', () => {
+  function avecJaune(jaune: unknown): Record<string, unknown> {
+    const dossier = ve005()
+    ;(dossier.matrice_inter_verts as Record<string, unknown>).valeur_jaune_s = jaune
+    return dossier
+  }
+
+  it('applique une valeur de catégorie à tous les groupes véhicules', () => {
+    const res = importDossiersFeux(fichier(avecJaune({ vehicules: 3 })), opts)
+    const c = Object.values(res.controllers)[0]
+    // V1 et V3 sont les seuls groupes véhicules ; P2 et P4 n'ont pas de jaune.
+    expect(c.amberByGroup).toEqual({ V1: 3, V3: 3 })
+    expect(c.amber).toBe(3)
+    expect(res.matches[0].avertissements.some((a) => /« vehicules »/.test(a) && /catégorie/.test(a))).toBe(true)
+  })
+
+  it('accepte « VL », « voitures » et un nombre seul', () => {
+    for (const jaune of [{ VL: 4 }, { voitures: 4 }, 4]) {
+      const res = importDossiersFeux(fichier(avecJaune(jaune)), opts)
+      expect(Object.values(res.controllers)[0].amberByGroup).toEqual({ V1: 4, V3: 4 })
+    }
+  })
+
+  it('laisse la valeur nommée d’un groupe l’emporter sur celle de la catégorie', () => {
+    const res = importDossiersFeux(fichier(avecJaune({ vehicules: 3, V3: 5 })), opts)
+    expect(Object.values(res.controllers)[0].amberByGroup).toEqual({ V1: 3, V3: 5 })
+  })
+
+  it('écarte une clé qui n’est ni un groupe ni une catégorie, et le dit', () => {
+    const res = importDossiersFeux(fichier(avecJaune({ V1: 3, V9: 3 })), opts)
+    expect(Object.values(res.controllers)[0].amberByGroup).toEqual({ V1: 3 })
+    expect(res.matches[0].avertissements.some((a) => /« V9 »/.test(a) && /sans correspondance/.test(a))).toBe(true)
+  })
+})
+
+describe('écarts d’écriture entre les noms de voies du dossier et ceux du réseau', () => {
+  it('rapproche abréviation, prénom en trop, mot outil en trop et apostrophe typographique', () => {
+    const cas: [string, string][] = [
+      ['Rue du Dr Igor Masourenok', 'Rue du Docteur Masourenok'],
+      ['Rue de la Croix de Borne', 'Rue de la Croix Borne'],
+      ["Place de l'Europe", 'Place de l’Europe'],
+      ['Rte de St Bonnet les Oules', 'Route de Saint-Bonnet-les-Oules'],
+      ['Av. du Gal de Gaulle', 'Avenue du Général de Gaulle'],
+      ['Bd Jean Jaurès', 'Boulevard Jean Jaurès'],
+      ['Ch. des Granges', 'Chemin des Granges'],
+      ['Imp. du Parc', 'Impasse du Parc'],
+      ['Pl. Jacques Raffin', 'Place Jacques Raffin'],
+    ]
+    for (const [dossier, osm] of cas) {
+      const a = normaliserVoie(dossier)
+      const b = normaliserVoie(osm)
+      expect(a && b && memeVoie(a, b), `${dossier} ≠ ${osm}`).toBe(true)
+    }
+  })
+
+  it('garde distinctes deux voies réellement différentes', () => {
+    const cas: [string, string][] = [
+      ['Rue de la Croix des Pères', 'Rue de la Croix de Borne'],
+      ['Rue de la Croix Borne', 'Rue de la Croix des Pères'],
+      ['Avenue de la Libération', 'Avenue du Général de Gaulle'],
+      ['Rue Marcel Pagnol', 'Rue Marcel Proust'],
+      ['Lotissement la Plagne Est', 'Lotissement la Plagne Ouest'],
+    ]
+    for (const [x, y] of cas) {
+      const a = normaliserVoie(x)
+      const b = normaliserVoie(y)
+      expect(a && b && memeVoie(a, b), `${x} = ${y}`).toBe(false)
+    }
+  })
+
+  it('recolle la lettre et le numéro d’une route départementale écrite avec une espace', () => {
+    expect(normaliserVoie('D 54')?.noyau).toBe('d54')
+    expect(normaliserVoie('RD 1082')?.noyau).toBe('d1082')
+  })
+
+  it('rattache un carrefour que ces seuls écarts d’écriture faisaient manquer', () => {
+    const res = importDossiersFeux(fichier({
+      id: 'VE005',
+      nom: 'Croix de Borne / Général de Gaulle',
+      voies: ['Avenue du Général de Gaulle (D1082)', 'Rue du Dr Igor Masourenok', 'Rue de la Croix de Borne'],
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'Rue du Dr Igor Masourenok' },
+        { id: 'V3', type: 'vehicule', voie: 'Rue de la Croix de Borne' },
+      ],
+      phases: [
+        { nom: 'Phase A Repos', vehicules: ['V1'], mini_s: 10, maxi_s: 40 },
+        { nom: 'Phase B', vehicules: ['V3'], mini_s: 8, maxi_s: 15 },
+      ],
+    }), { network: reseauEcritureOsm() })
+    const match = res.matches[0]
+    expect(match.confiance).toBe('sure')
+    expect(match.nodeId).toBe('c')
+    // Le carrefour voisin porte la « Croix des Pères » : il ne doit pas entrer en concurrence.
+    expect(match.raison).toContain('Rue du Dr Igor Masourenok')
+    expect(match.groupesNonRattaches).toEqual([])
+  })
+})
+
+describe('voie désignée par sa référence routière', () => {
+  function dossierRD(voies: string[]): Record<string, unknown> {
+    return {
+      id: 'RD1082/CHEMIN DES GRANGES',
+      nom: 'RD 1082 / Croix Borne',
+      voies,
+      groupes: [
+        { id: 'V1', type: 'vehicule', voie: 'RD 1082, arrivée est' },
+        { id: 'V3', type: 'vehicule', voie: 'Rue de la Croix Borne (branche sud)' },
+      ],
+      phases: [
+        { nom: 'Phase A Repos', vehicules: ['V1'], mini_s: 10, maxi_s: 40 },
+        { nom: 'Phase B', vehicules: ['V3'], mini_s: 8, maxi_s: 15 },
+      ],
+    }
+  }
+
+  it('rapproche « RD 1082 » du nom que le dossier lui donne entre parenthèses, et le dit', () => {
+    const res = importDossiersFeux(
+      fichier(dossierRD(['Avenue du Général de Gaulle (D1082)', 'Rue de la Croix Borne'])),
+      { network: reseauEcritureOsm() },
+    )
+    const match = res.matches[0]
+    expect(match.nodeId).toBe('c')
+    expect(match.groupesNonRattaches).toEqual([])
+    expect(match.avertissements.some((a) => /« RD 1082 » → « Avenue du Général de Gaulle »/.test(a))).toBe(true)
+  })
+
+  it('laisse le groupe non rattaché et nomme la cause exacte quand rien ne nomme la référence', () => {
+    const res = importDossiersFeux(
+      fichier(dossierRD(['RD 1082', 'Rue de la Croix Borne'])),
+      { network: reseauEcritureOsm() },
+    )
+    const match = res.matches[0]
+    expect(match.nodeId).toBe('c')
+    expect(match.groupesNonRattaches).toContain('V1')
+    const cause = match.avertissements.find((a) => /référence routière/.test(a))!
+    expect(cause).toContain('V1')
+    expect(cause).toMatch(/ne retient que le nom des voies/)
+    // Ce n'est pas un problème de géométrie de traversée piétonne : ne pas y envoyer le technicien.
+    expect(cause).not.toMatch(/traversée/)
   })
 })

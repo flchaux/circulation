@@ -15,9 +15,9 @@ import { useId, useMemo, useRef, useState } from 'react'
 import type { JSX, KeyboardEvent } from 'react'
 import { useAppStore } from '@/state/store'
 import type {
-  ControllerId, GreenKind, MovementKey, Network, SignalController, SignalGroup, SignalPhase, SignalPlan,
+  ControllerId, GreenKind, MovementKey, Network, NodeId, SignalController, SignalGroup, SignalPhase, SignalPlan,
 } from '@/model/types'
-import type { DossierImportReport } from '@/state/storeTypes'
+import type { DossierNonRattache } from '@/state/storeTypes'
 import type { Movement } from '@/model/geometry'
 import {
   activePlan, clockAt, controllerCycle, controllerMovements, describeMovement, phaseDuration, phaseMovements,
@@ -116,7 +116,10 @@ export function FeuxPanel(): JSX.Element {
 
 function DossiersImport(): JSX.Element {
   const fileRef = useRef<HTMLInputElement>(null)
-  const [rapport, setRapport] = useState<DossierImportReport | null>(null)
+  // Le bilan vient du store et non d'un état local : changer d'onglet démonte ce panneau, et l'exploitant
+  // doit pouvoir revenir lire les réserves de l'import après avoir regardé ses carrefours sur la carte.
+  const rapport = useAppStore((s) => s.dossiersRapport)
+  const nonRattaches = useAppStore((s) => s.dossiersNonRattaches)
 
   return (
     <section className="block">
@@ -137,7 +140,7 @@ function DossiersImport(): JSX.Element {
           // Le champ est vidé tout de suite pour qu'un second import du même fichier déclenche bien `change`.
           e.target.value = ''
           if (!file) return
-          void file.text().then((text) => setRapport(useAppStore.getState().importDossiersFeux(text)))
+          void file.text().then((text) => useAppStore.getState().importDossiersFeux(text))
         }}
       />
       {rapport ? (
@@ -148,17 +151,110 @@ function DossiersImport(): JSX.Element {
             {rapport.nonRattaches ? <li>{formatNumber(rapport.nonRattaches)} {S.feux.dossiersNonRattaches}</li> : null}
             {!rapport.matches ? <li>{S.feux.dossiersAucun}</li> : null}
           </ul>
-          {rapport.avertissements.length ? (
-            <>
-              <p className="hint">{S.feux.dossiersReserves}</p>
-              <ul className="warnings">
-                {rapport.avertissements.map((a, i) => <li key={i}>{a}</li>)}
-              </ul>
-            </>
-          ) : null}
+        </div>
+      ) : null}
+      {/* Les dossiers à rattacher passent avant les réserves : sur un fichier réel celles-ci font
+          plusieurs dizaines de lignes, et repousseraient hors de l'écran la seule chose à faire. */}
+      {nonRattaches.length ? (
+        <>
+          <h4>{S.feux.dossiersARattacher} · {formatNumber(nonRattaches.length)}</h4>
+          <p className="hint">{S.feux.dossiersARattacherAide} {S.feux.dossierCandidatsAide}</p>
+          {nonRattaches.map((d) => <DossierARattacher key={d.dossierId} dossier={d} />)}
+        </>
+      ) : null}
+      {rapport?.avertissements.length ? (
+        <div className="report">
+          <p className="hint">{S.feux.dossiersReserves}</p>
+          <ul className="warnings">
+            {rapport.avertissements.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
         </div>
       ) : null}
     </section>
+  )
+}
+
+/** Valeur de choix désignant le carrefour sélectionné sur la carte, quand aucun candidat ne convient. */
+const CHOIX_CARTE = 'carte'
+
+/**
+ * Un dossier qu'aucun carrefour ne revendique seul : ses voies, ce qui bloque, et le choix du carrefour
+ * auquel l'appliquer. Les candidats sont désignés par leurs rues ; leur identifiant OpenStreetMap
+ * n'apparaît nulle part, il ne figure sur aucun dossier de carrefour.
+ */
+function DossierARattacher({ dossier }: { dossier: DossierNonRattache }): JSX.Element {
+  const [choix, setChoix] = useState<string>(dossier.candidats[0]?.nodeId ?? CHOIX_CARTE)
+  // Repli sur la carte quand le dossier ne propose rien, ou quand le candidat retenu a disparu du réseau.
+  const surCarte = choix === CHOIX_CARTE || !dossier.candidats.some((c) => c.nodeId === choix)
+  const noeudCarte = useAppStore((s) => (s.selection?.kind === 'node' ? s.selection.id : null))
+  const nomNoeudCarte = useAppStore((s) => (
+    s.selection?.kind === 'node' ? s.project?.network.nodes[s.selection.id]?.label ?? '' : ''
+  ))
+  const cible = surCarte ? noeudCarte : choix
+
+  /** Montrer un carrefour : la carte s'y recentre, ce qu'un survol seul ne fait pas. */
+  const montrer = (nodeId: NodeId): void => {
+    useAppStore.getState().select({ kind: 'node', id: nodeId }, { reveal: true })
+  }
+
+  return (
+    <div className="dossier-attente">
+      <p className="dossier-nom">{dossier.nom} <span className="muted">({dossier.dossierId})</span></p>
+      {dossier.voies.length ? (
+        <p className="hint">{S.feux.dossierVoies} : {dossier.voies.join(', ')}</p>
+      ) : null}
+      <p className="hint">{S.feux.dossierPourquoi} : {dossier.raison}</p>
+      <p className="field-label">{S.feux.dossierCandidats}</p>
+      {dossier.candidats.length ? (
+        <ul className="list">
+          {dossier.candidats.map((c) => (
+            <li key={c.nodeId} className="list-item">
+              <button
+                type="button"
+                className={`list-row${!surCarte && choix === c.nodeId ? ' active' : ''}`}
+                aria-pressed={!surCarte && choix === c.nodeId}
+                onClick={() => { setChoix(c.nodeId); montrer(c.nodeId) }}
+                onFocus={() => montrer(c.nodeId)}
+                onMouseEnter={() => useAppStore.getState().setHover({ kind: 'node', id: c.nodeId })}
+                onMouseLeave={() => useAppStore.getState().setHover(null)}
+              >
+                <span className="list-main">{c.etiquette}</span>
+                <span className="list-side">{S.feux.dossierVoir}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="hint">{S.feux.dossierAucunCandidat}</p>
+      )}
+      {/* Dernier recours : le carrefour que le dossier décrit peut n'être proposé par aucun candidat,
+          par exemple quand le fond de carte ne nomme pas ses rues comme le dossier. */}
+      <ul className="list">
+        <li className="list-item">
+          <button
+            type="button"
+            className={`list-row${surCarte ? ' active' : ''}`}
+            aria-pressed={surCarte}
+            disabled={!noeudCarte}
+            onClick={() => setChoix(CHOIX_CARTE)}
+          >
+            {/* Le nom du carrefour passe en tête : c'est lui que l'exploitant relit avant de valider. */}
+            <span className="list-main">{noeudCarte ? nomNoeudCarte || S.feux.dossierSurCarte : S.feux.dossierSurCarteAucun}</span>
+            <span className="list-side">{noeudCarte ? S.feux.dossierSurCarte : ''}</span>
+          </button>
+        </li>
+      </ul>
+      <div className="row">
+        <button
+          type="button"
+          className="button primary"
+          disabled={!cible}
+          onClick={() => { if (cible) useAppStore.getState().rattacherDossier(dossier.dossierId, cible) }}
+        >
+          {S.feux.dossierRattacher}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -249,12 +345,17 @@ function ControllerEditor(props: {
       ))}
       <div className="row">
         <button type="button" className="button" onClick={() => useAppStore.getState().addPhase(controller.id)}>{S.feux.ajouterPhase}</button>
+        {/* Même action : revenir au plan par défaut détache le dossier, puisque ses groupes, ses plans et
+            ses inter-verts décrivent les phases qui disparaissent. Le libellé le dit quand c'est le cas. */}
         <button
           type="button"
           className="button"
-          onClick={() => { if (confirm(S.feux.confirmerRegenerer)) useAppStore.getState().resetControllerPlan(controller.id) }}
+          onClick={() => {
+            const message = controller.source ? S.feux.confirmerDetacher : S.feux.confirmerRegenerer
+            if (confirm(message)) useAppStore.getState().resetControllerPlan(controller.id)
+          }}
         >
-          {S.feux.regenerer}
+          {controller.source ? S.feux.detacherDossier : S.feux.regenerer}
         </button>
       </div>
     </section>

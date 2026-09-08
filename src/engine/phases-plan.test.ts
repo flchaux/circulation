@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { SignalController } from '@/model/types'
-import { controllerCycle, planPhases, phaseRunsIn } from '@/model/signals'
+import { controllerCycle, planPhases, phaseRunsIn, validateController } from '@/model/signals'
 import { SignalEngine, SIG_RED } from '@/engine/signals'
 import { buildGraph } from '@/engine/routing'
 import { crossNetwork, withSignals } from '@/model/testNetworks'
@@ -83,5 +83,24 @@ describe('phase propre à un plan', () => {
       phases: { p1: { green: 0, skipped: true }, p2: { green: 0, skipped: true }, p3: { green: 0, skipped: true } },
     }
     expect(planPhases(controller, toutFerme).length).toBe(controller.phases.length)
+  })
+})
+
+describe('validation d’une phase fermée par un plan', () => {
+  it('ne signale pas un vert nul sur une phase que le plan ferme volontairement', () => {
+    const { controller } = reseau()
+    const creuse = controller.plans![1]
+    const anomalies = validateController(withSignals(crossNetwork()), { ...controller, plans: [creuse] }, undefined)
+    expect(anomalies.some((a) => /durée de vert nulle/.test(a))).toBe(false)
+  })
+
+  it('signale toujours un vert nul sur une phase que le plan ouvre', () => {
+    const { controller } = reseau()
+    const casse = {
+      ...controller,
+      plans: [{ ...controller.plans![0], phases: { ...controller.plans![0].phases, p1: { green: 0 } } }],
+    }
+    const anomalies = validateController(withSignals(crossNetwork()), casse, undefined)
+    expect(anomalies.some((a) => /durée de vert nulle/.test(a))).toBe(true)
   })
 })

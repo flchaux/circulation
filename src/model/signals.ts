@@ -44,13 +44,28 @@ export function phaseGreenGroups(controller: SignalController, phase: SignalPhas
  * Mouvements au vert pendant une phase, et type de vert de chacun.
  *
  * Un dossier de carrefour écrit ses phases en groupes de signaux : les mouvements verts sont l'union des
- * mouvements des groupes véhicules ouverts, moins ceux qu'un vert piéton simultané traverse. C'est par là
- * que le temps piéton consomme de la capacité (§14.5) — sans cette soustraction, un plan importé
- * surestimerait le débit du carrefour.
+ * mouvements des groupes véhicules ouverts (§14.5).
+ *
+ * **Vert piéton concomitant.** Un vert piéton ne ferme pas le mouvement véhicule qui franchit sa traversée
+ * quand ce mouvement est ouvert dans la même phase : c'est le fonctionnement normal d'un carrefour français,
+ * le conducteur qui tourne a le vert et cède le passage aux piétons engagés. Le mouvement est donc dégradé
+ * en `permitted` — vert avec cession — et non supprimé. Le cas du **temps piéton protégé** (aucun groupe
+ * véhicule de la branche traversée n'est vert dans la phase) n'a pas besoin d'être traité ici : ces
+ * mouvements sont déjà absents de l'union, faute de groupe véhicule pour les ouvrir.
+ *
+ * Fermer ces mouvements, comme on le faisait, revenait à les laisser au rouge à toutes les phases sur un
+ * dossier réel (huit tourne-à-gauche et tourne-à-droite au carrefour VE001 de Veauche), donc à bloquer les
+ * approches correspondantes : une erreur de modélisation bien plus grave que l'optimisme signalé ci-dessous.
+ *
+ * **Limite assumée.** La capacité d'un tel mouvement est optimiste : le modèle de cession du moteur
+ * (`Simulation.acceptGap`) calcule les créneaux acceptables à partir des flux **véhicules** en conflit, or
+ * le conflit est ici piéton et le simulateur ne dispose d'aucune donnée de demande piétonne (les dossiers
+ * n'en portent pas). Un mouvement permis par un seul vert piéton voit donc un conflit nul et s'écoule
+ * presque librement, alors qu'en réalité une vague de piétons le bloque. `validateController` le signale.
  *
  * `skipped` recense les groupes que le cycle courant ne dessert pas : c'est ainsi qu'une traversée sur
- * bouton poussoir (`recall` absent) laisse, les cycles où personne n'appuie, les mouvements sécants ouverts.
- * Vide par défaut : tous les groupes cités par la phase sont verts, comportement historique.
+ * bouton poussoir (`recall` absent) rend, les cycles où personne n'appuie, le vert protégé aux mouvements
+ * sécants. Vide par défaut : tous les groupes cités par la phase sont verts, comportement historique.
  */
 export function phaseMovements(
   controller: SignalController,
@@ -70,9 +85,29 @@ export function phaseMovements(
   }
   for (const g of groups) {
     if (g.type !== 'pieton') continue
-    for (const key of g.movements) delete out[key]
+    // Vert avec cession : la traversée retire la protection, jamais le vert. Le `key in out` est essentiel —
+    // un vert piéton n'ouvre aucun mouvement véhicule que la phase n'ouvrait pas déjà.
+    for (const key of g.movements) if (key in out) out[key] = 'permitted'
   }
   return out
+}
+
+/**
+ * Mouvements véhicules qu'une phase laisse au vert alors qu'une traversée piétonne de la même phase les
+ * coupe : ils sont `permitted` et cèdent aux piétons (voir `phaseMovements`). Sert à signaler l'optimisme
+ * de leur capacité, faute de demande piétonne modélisée.
+ */
+export function phasePedestrianYields(
+  controller: SignalController,
+  phase: SignalPhase,
+): MovementKey[] {
+  const green = phaseMovements(controller, phase)
+  const out = new Set<MovementKey>()
+  for (const g of phaseGreenGroups(controller, phase)) {
+    if (g.type !== 'pieton') continue
+    for (const key of g.movements) if (key in green) out.add(key)
+  }
+  return [...out]
 }
 
 /**
@@ -111,9 +146,10 @@ export interface PhaseTransition {
  *
  * Trois règles complètent ce principe, toutes tirées de la lecture des dossiers :
  *  - **dégagement piéton d'une sous-phase.** Une traversée qui s'éteint doit être dégagée avant que les
- *    mouvements qu'elle fermait ne rouvrent, y compris quand le groupe véhicule qui les porte est vert dans
- *    les deux phases (motif « phase B = V3 + P2, phase C = V3 ») : ce groupe n'apparaît alors ni dans
- *    `losing` ni dans `taking`, et le carrefour rouvrirait sans le moindre rouge de dégagement ;
+ *    mouvements qui lui cédaient ne reprennent le vert franc, y compris quand le groupe véhicule qui les
+ *    porte est vert dans les deux phases (motif « phase B = V3 + P2, phase C = V3 ») : ce groupe n'apparaît
+ *    alors ni dans `losing` ni dans `taking`, et le carrefour repasserait en vert protégé sans le moindre
+ *    rouge de dégagement, alors que des piétons sont encore engagés sur la chaussée ;
  *  - **jaune restreint aux conflits.** Seul un groupe véhicule qui possède une case vers un groupe qui prend
  *    le vert peut allonger le jaune : sinon un groupe sans rapport mangerait le rouge de dégagement ;
  *  - **repli sur le jaune du contrôleur.** Faute de colonne « jaune » exploitable dans le dossier, le jaune
@@ -150,14 +186,20 @@ export function phaseTransition(
 
   const byId = new Map((controller.groups ?? []).map((g) => [g.id, g]))
   // Dégagement des traversées qui s'éteignent. Un groupe véhicule vert dans les deux phases est absent de
-  // `taking`, mais les mouvements que la traversée lui fermait repassent bel et bien au vert : c'est le cas
-  // d'une sous-phase piétonne, et l'ignorer supprimerait tout rouge de dégagement.
+  // `taking`, mais les mouvements qui cédaient à la traversée y repassent bel et bien au vert protégé :
+  // c'est le cas d'une sous-phase piétonne, et l'ignorer supprimerait tout rouge de dégagement.
   const losingPed = losing.filter((g) => byId.get(g)?.type === 'pieton')
   if (losingPed.length) {
     const greenTo = phaseMovements(controller, to)
+    // Un mouvement qui cède encore à une traversée dans la phase suivante ne « rouvre » pas : il était déjà
+    // permis, il le reste, et rien ne justifie un rouge de dégagement de plus. Ce qui rouvre, c'est le
+    // passage de la cession au vert franc (`permitted` → `protected`), donc les mouvements que plus aucune
+    // traversée de la phase d'arrivée ne coupe.
+    const stillYielding = new Set(phasePedestrianYields(controller, to))
     for (const p of losingPed) {
       const group = byId.get(p)
-      if (!group?.movements.some((key) => key in greenTo)) continue // rien ne rouvre : pas de dégagement dû
+      // rien ne rouvre : pas de dégagement dû
+      if (!group?.movements.some((key) => key in greenTo && !stillYielding.has(key))) continue
       let clear = 0
       for (const h of toIds) {
         const v = cell(p, h)
@@ -499,11 +541,14 @@ export function validateController(
   const knownGroups = new Set((controller.groups ?? []).map((g) => g.id))
   const piloted = new Set(movements.map((m) => m.key))
   const everGreen = new Set<MovementKey>()
-  /** Mouvements ouverts par un groupe véhicule mais refermés par un vert piéton dans la même phase. */
-  const closedByPedestrians = new Set<MovementKey>()
+  /** Mouvements verts qu'une traversée piétonne de la même phase coupe : permis, à capacité optimiste. */
+  const yieldingToPedestrians = new Set<MovementKey>()
 
   for (const p of controller.phases) {
-    if (planPhaseTiming(p, plan).green <= 0) out.push(`Phase « ${p.name} » : durée de vert nulle ou négative.`)
+    const timing = planPhaseTiming(p, plan)
+    // Une phase que ce plan ferme volontairement (phase propre à un autre plan du dossier) n'a pas de vert
+    // à avoir : la signaler serait une fausse alarme sur tout dossier à plusieurs plans.
+    if (!timing.skipped && timing.green <= 0) out.push(`Phase « ${p.name} » : durée de vert nulle ou négative.`)
     if (phaseAmber(controller, p) < 0 || phaseAllRed(controller, p) < 0) {
       out.push(`Phase « ${p.name} » : orange ou rouge intégral négatif.`)
     }
@@ -516,11 +561,9 @@ export function validateController(
     }
     const green = phaseMovements(controller, p)
     for (const k of Object.keys(green)) everGreen.add(k)
-    // Un mouvement ouvert par un groupe véhicule mais coupé par un vert piéton n'est pas un oubli de plan.
-    for (const g of phaseGreenGroups(controller, p)) {
-      if (g.type !== 'vehicule') continue
-      for (const k of g.movements) if (!(k in green) && piloted.has(k)) closedByPedestrians.add(k)
-    }
+    // Un mouvement vert en même temps que la traversée qu'il franchit reste ouvert, en cession (§14.5) :
+    // ce n'est pas une anomalie de plan, mais sa capacité est surestimée, ce qui se dit plus bas.
+    for (const k of phasePedestrianYields(controller, p)) if (piloted.has(k)) yieldingToPedestrians.add(k)
     // Conflits entre mouvements protégés simultanés.
     const greens = movements.filter((m) => green[m.key])
     for (let i = 0; i < greens.length; i++) {
@@ -544,14 +587,15 @@ export function validateController(
     }
   }
 
-  const never = movements.filter((m) => !everGreen.has(m.key))
-  const blocked = never.filter((m) => closedByPedestrians.has(m.key))
-  const orphans = never.filter((m) => !closedByPedestrians.has(m.key))
+  const orphans = movements.filter((m) => !everGreen.has(m.key))
   if (orphans.length) {
     out.push(`${orphans.length} mouvement(s) jamais au vert : ${orphans.slice(0, 3).map((m) => describeMovement(network, m)).join(', ')}${orphans.length > 3 ? '…' : ''}.`)
   }
-  if (blocked.length) {
-    out.push(`${blocked.length} mouvement(s) fermé(s) par un vert piéton à chaque phase : ${blocked.slice(0, 3).map((m) => describeMovement(network, m)).join(', ')}${blocked.length > 3 ? '…' : ''}.`)
+  // Limite du modèle, pas défaut du dossier : ces mouvements cèdent à des piétons que le simulateur ne
+  // représente pas (aucune donnée de demande piétonne), leur débit est donc un majorant.
+  const yielding = movements.filter((m) => yieldingToPedestrians.has(m.key))
+  if (yielding.length) {
+    out.push(`${yielding.length} mouvement(s) au vert en même temps que la traversée piétonne qu'ils franchissent : ils cèdent aux piétons, leur capacité simulée est optimiste (aucune demande piétonne au dossier) : ${yielding.slice(0, 3).map((m) => describeMovement(network, m)).join(', ')}${yielding.length > 3 ? '…' : ''}.`)
   }
 
   // Plans horaires : durées, phases citées et plages.

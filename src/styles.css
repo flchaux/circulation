@@ -1151,6 +1151,48 @@ input[type='checkbox'] {
   white-space: nowrap;
 }
 
+/*
+ * Dossier laissé de côté par l'import, en attente d'un rattachement à la main.
+ *
+ * Chaque dossier est encadré comme une fiche : plusieurs peuvent s'enchaîner dans le même bloc, et les
+ * voies de l'un ne doivent pas se lire comme les carrefours proposés pour le suivant. Le liseré reprend
+ * la couleur des avertissements : c'est bien une réserve de l'import, pas un réglage ordinaire.
+ */
+.dossier-attente {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--bordure);
+  border-left: 3px solid var(--avertissement);
+  border-radius: var(--rayon);
+  background: var(--surface-2);
+}
+
+/*
+ * Un dossier dont les voies suivent une avenue entière peut proposer vingt-cinq carrefours : la liste
+ * défile plutôt que de repousser le bouton de rattachement hors de la barre latérale.
+ */
+.dossier-attente > .list {
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+/*
+ * Le nom d'un carrefour candidat se lit en entier, sur deux lignes s'il le faut. Ailleurs, tronquer une
+ * ligne de liste est sans conséquence ; ici les noms de rues sont le seul moyen de distinguer deux
+ * carrefours voisins, et « Avenue de la Libération / Rue de… » ne distingue plus rien.
+ */
+.dossier-attente .list-main {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: clip;
+}
+
+.dossier-nom {
+  font-weight: 600;
+}
+
 /* Matrice d'inter-verts : lecture seule, une case vide signale deux groupes compatibles. */
 .data-table.intervert th,
 .data-table.intervert td {

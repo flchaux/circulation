@@ -530,7 +530,7 @@ Points tranchés pendant la réalisation, au-delà de la spécification ci-dessu
 | Vérification | Commande | État au 4 septembre 2026 |
 |---|---|---|
 | Types | `npm run typecheck` | 0 erreur |
-| Tests unitaires | `npm test` | 370 tests, 26 fichiers |
+| Tests unitaires | `npm test` | 407 tests, 27 fichiers |
 | Build de production | `npm run build` | réussi |
 | Parcours navigateur | `npm run e2e` | 7 parcours, en local comme sur le site déployé |
 
@@ -652,6 +652,18 @@ contrôleur sélectionne le plan dont la plage horaire couvre l'heure courante ;
 n'intervient qu'en fin de cycle, jamais au milieu d'une phase. Sans `schedule`, le premier plan s'applique en
 permanence ; sans `plans`, les durées portées par les phases font foi.
 
+### 14.3 bis Rattachement au réseau
+
+Un dossier est rattaché à un carrefour du réseau en comparant ses noms de voies à ceux des tronçons incidents.
+La comparaison tolère les abréviations (Dr, St, Av, Rte…), les apostrophes typographiques, les mots outils
+surnuméraires et un prénom intercalé, sans jamais rapprocher deux voies réellement différentes.
+
+L'importeur **ne devine jamais** : à égalité entre plusieurs carrefours, il ne rattache rien et rend la liste
+des candidats. C'est le cas fréquent des carrefours décalés, qu'OpenStreetMap éclate en deux nœuds distants
+d'une dizaine de mètres dont aucun ne réunit toutes les branches du dossier. Sur les six dossiers de Veauche,
+trois se rattachent seuls et trois demandent un arbitrage. L'utilisateur tranche depuis le panneau Feux, via
+`rattacherDossier`, et l'opération reste annulable.
+
 ### 14.4 bis Conventions et décisions de modélisation
 
 Ces points ne sont dictés ni par le format ni par le document d'origine : ils sont tranchés ici.
@@ -680,9 +692,18 @@ Ces points ne sont dictés ni par le format ni par le document d'origine : ils s
 
 ### 14.5 Groupes piétons
 
-Un groupe piéton au vert interdit les mouvements véhicules qui franchissent sa traversée : ceux-ci sont rouges
-pendant la phase même si un groupe véhicule les autorise. C'est ainsi que le temps piéton consomme de la
-capacité, ce qu'un plan importé doit refléter sous peine de surestimer le débit du carrefour.
+Une traversée verte **en même temps** que le groupe véhicule de sa branche ne ferme pas les mouvements qui la
+franchissent : elle les fait passer de « protégé » à « permis ». C'est le fonctionnement réel d'un carrefour
+français, où le véhicule qui tourne a le vert et cède aux piétons. Les fermer serait pire que faux : sur le
+dossier VE001 de Veauche, huit tourne-à-droite et tourne-à-gauche se retrouvaient au rouge permanent, donc
+leur approche bloquée.
+
+Un temps piéton **protégé**, où aucun groupe véhicule de la branche n'est vert, laisse ces mouvements au rouge
+comme n'importe quelle phase qui ne les ouvre pas : rien de particulier à faire.
+
+Limite assumée : le modèle de cession calcule les créneaux sur les flux **véhicules** en conflit, or le conflit
+est ici piéton et aucun dossier ne porte de demande piétonne. La capacité d'un mouvement qui ne cède qu'à des
+piétons est donc optimiste. `validateController` le signale carrefour par carrefour.
 
 **Rappel et appel.** Une traversée en rappel (`SignalGroup.recall`) est desservie à chaque cycle. Une
 traversée sur bouton poussoir ne l'est qu'une partie des cycles : faute de donnée de demande piétonne dans

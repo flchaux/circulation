@@ -97,9 +97,51 @@ export interface DossierImportReport {
 }
 
 /**
+ * Carrefour du réseau proposé pour un dossier laissé de côté.
+ *
+ * Il est désigné par ses rues et jamais par son identifiant OpenStreetMap : celui qui exploite le
+ * carrefour le connaît par ses voies, pas par un numéro de nœud qui ne figure sur aucun dossier.
+ */
+export interface CarrefourCandidat {
+  nodeId: NodeId
+  /** Rues qui se croisent au carrefour (« Avenue de la Libération / Rue de Jourcey »). */
+  etiquette: string
+}
+
+/**
+ * Dossier lu par l'importeur mais laissé sans carrefour : plusieurs carrefours du réseau lui
+ * correspondent aussi bien, ou aucun (§14.3). L'égalité peut être réelle — OpenStreetMap découpe
+ * parfois un carrefour en deux nœuds voisins portant chacun une partie des voies — et aucune
+ * heuristique ne la tranchera : seul l'exploitant le peut, via `rattacherDossier`.
+ *
+ * Vit dans l'état d'interface : ni dans le projet, ni dans l'historique, ni dans la sauvegarde.
+ */
+export interface DossierNonRattache {
+  /** Identifiant du dossier (VE006, « Place de l'Europe »…). */
+  dossierId: string
+  nom: string
+  /**
+   * Voies du dossier telles qu'il les écrit en entête (« Avenue de la Libération (D1082) »), à défaut
+   * celles de ses groupes : ce sont les rues que l'exploitant reconnaîtra sur le terrain.
+   */
+  voies: string[]
+  /** Pourquoi l'importeur n'a pas tranché, en français. */
+  raison: string
+  /** Carrefours du réseau qui correspondent aussi bien ; vide si aucun ne porte ces voies. */
+  candidats: CarrefourCandidat[]
+  /**
+   * Contenu brut du dossier, tel qu'il figure dans le fichier importé. `rattacherDossier` le repasse
+   * à l'importeur plutôt que de refaire la conversion : les groupes, les phases, les plans, le
+   * calendrier et les inter-verts n'ont qu'une seule implémentation (src/geo/dossierFeux.ts).
+   */
+  brut: unknown
+}
+
+/**
  * Invariants du store :
- *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover`, `ui.toolNodes` et
- *    `ui.planApercu` sont purgés des identifiants qui n'existent plus ; l'historique est vidé au chargement d'un projet ;
+ *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover`, `ui.toolNodes`,
+ *    `ui.planApercu` et les candidats de `dossiersNonRattaches` sont purgés des identifiants qui n'existent
+ *    plus ; l'historique est vidé au chargement d'un projet ;
  *  - `sim.frame` et `sim.results` (messages `frame`/`stats`) sont écrits hors immer et ne déclenchent ni `dirty` ni autosauvegarde ;
  *    `project.lastResults` n'est écrit qu'à `done` ;
  *  - toute modification de topologie appelle `reconcileDemand` puis `sanitizeNetwork` et marque `sim.stale`.
@@ -119,6 +161,15 @@ export interface AppState {
   library: LibraryEntry[]
   /** Modifications non enregistrées dans la bibliothèque. */
   dirty: boolean
+  /**
+   * Bilan du dernier import de dossiers de carrefour, `null` tant qu'aucun n'a été fait.
+   *
+   * Il vit dans le store et non dans le panneau : changer d'onglet démonte le panneau Feux, et un bilan
+   * perdu au premier coup d'œil sur la carte obligerait à réimporter le fichier pour le relire.
+   */
+  dossiersRapport: DossierImportReport | null
+  /** Dossiers importés qu'aucun carrefour ne revendique seul, en attente d'un rattachement manuel (§14.3). */
+  dossiersNonRattaches: DossierNonRattache[]
 
   /* --------- Projet --------- */
   /**
@@ -168,7 +219,12 @@ export interface AppState {
   addPhase(controllerId: ControllerId): void
   removePhase(controllerId: ControllerId, phaseId: string): void
   movePhase(controllerId: ControllerId, phaseId: string, direction: -1 | 1): void
-  /** Regénère le plan par défaut à 2 phases. */
+  /**
+   * Regénère le plan par défaut à 2 phases et **détache le dossier de carrefour** éventuel : groupes,
+   * inter-verts, plans horaires, calendrier et origine repartent avec les phases qu'ils décrivaient.
+   * Les garder ferait cohabiter des groupes qui ne commandent plus rien avec des plans renvoyant à des
+   * phases disparues, sous une origine annonçant toujours le dossier.
+   */
   resetControllerPlan(controllerId: ControllerId): void
   /** Regroupe plusieurs nœuds à feux sous un même contrôleur (ou les sépare). */
   setControllerNodes(controllerId: ControllerId, nodeIds: NodeId[]): void
@@ -177,8 +233,20 @@ export interface AppState {
   /**
    * Import d'un fichier de dossiers de carrefour (§14) : les contrôleurs et les régulations reconnus
    * remplacent ceux du réseau, dossier par dossier. Annulable ; renvoie le bilan à afficher.
+   * Le bilan et les dossiers non rattachés restent lisibles ensuite dans `dossiersRapport` et
+   * `dossiersNonRattaches`.
    */
   importDossiersFeux(text: string): DossierImportReport
+  /**
+   * Rattache à la main un dossier de `dossiersNonRattaches` au carrefour `nodeId` : le contrôleur du
+   * dossier (groupes rattachés aux mouvements de ce carrefour, phases, plans, calendrier, matrice
+   * d'inter-verts) remplace le plan du nœud, dont la régulation passe en « signals ». Annulable.
+   *
+   * Sans effet, avec un message d'erreur, si le dossier n'est plus en attente, si le nœud n'existe pas
+   * ou si le dossier ne décrit rien d'applicable à ce carrefour. Le dossier appliqué sort de la liste
+   * d'attente et son contrôleur devient la sélection.
+   */
+  rattacherDossier(dossierId: string, nodeId: NodeId): void
   /**
    * Impose un plan de feux à un contrôleur, pour l'affichage **et** pour la simulation ; `null` rend la
    * main au calendrier horaire. Réglage d'étude : il vit dans `ui.planApercu`, jamais dans le projet.

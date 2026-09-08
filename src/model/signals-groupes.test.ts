@@ -7,7 +7,8 @@ import type { Network, SignalController, SignalPhase } from './types'
 import { crossNetwork } from './testNetworks'
 import {
   activePlan, activePlanAt, clockAt, completeSignalPlans, controllerCycle, defaultPlan, phaseDuration,
-  phaseGreenGroups, phaseMovements, phaseTransition, planPhaseTiming, scheduleCovers, validateController,
+  phaseGreenGroups, phaseMovements, phasePedestrianYields, phaseTransition, planPhaseTiming, scheduleCovers,
+  validateController,
 } from './signals'
 
 /* ----------------------------- Fabriques ----------------------------- */
@@ -83,19 +84,47 @@ describe('mouvements dérivés des groupes', () => {
     expect(phaseMovements(c, c.phases[0])).toEqual({ 'w_in>e_out': 'protected', 'e_in>w_out': 'protected' })
   })
 
-  it('union des groupes véhicules verts, moins ce qu’un vert piéton traverse', () => {
+  it('union des groupes véhicules verts, en cession sous un vert piéton concomitant', () => {
     const c = dossierController()
-    // V1 ouvre aussi le tourne-à-gauche vers le nord, mais P1 est vert : il reste rouge.
-    expect(phaseMovements(c, c.phases[0])).toEqual({ 'w_in>e_out': 'protected', 'e_in>w_out': 'protected' })
+    // V1 ouvre aussi le tourne-à-gauche vers le nord et P1 est vert : le conducteur a le vert et cède aux
+    // piétons (§14.5). Le fermer le laisserait au rouge à toutes les phases, donc bloquerait son approche.
+    expect(phaseMovements(c, c.phases[0]))
+      .toEqual({ 'w_in>e_out': 'protected', 'e_in>w_out': 'protected', 'w_in>n_out': 'permitted' })
     expect(phaseMovements(c, c.phases[1])).toEqual({ 's_in>n_out': 'protected', 'n_in>s_out': 'protected' })
+    expect(phasePedestrianYields(c, c.phases[0])).toEqual(['w_in>n_out'])
+    expect(phasePedestrianYields(c, c.phases[1])).toEqual([])
   })
 
-  it('sans le groupe piéton, le mouvement sécant redevient vert', () => {
+  it('un temps piéton protégé laisse le mouvement au rouge, faute de groupe véhicule', () => {
+    // P1 seul : aucun groupe véhicule n'ouvre la branche traversée, rien n'est à dégrader en cession.
+    const c = dossierController({
+      phases: [phase('p1', 'Traversée seule', 10, { groups: ['P1'] }), phase('p2', 'Nord-sud', 25, { groups: ['V2'] })],
+    })
+    expect(phaseMovements(c, c.phases[0])).toEqual({})
+    expect(phasePedestrianYields(c, c.phases[0])).toEqual([])
+  })
+
+  it('le vert piéton retire la protection même quand la phase l’avait écrite « protected »', () => {
+    const c = dossierController({
+      phases: [
+        phase('p1', 'Est-ouest', 20, { groups: ['V1', 'P1'], movements: { 'w_in>n_out': 'protected' } }),
+        phase('p2', 'Nord-sud', 25, { groups: ['V2'] }),
+      ],
+    })
+    expect(phaseMovements(c, c.phases[0])['w_in>n_out']).toBe('permitted')
+  })
+
+  it('une traversée non desservie rend le vert protégé au mouvement sécant', () => {
+    const c = dossierController()
+    expect(phaseMovements(c, c.phases[0], new Set(['P1']))['w_in>n_out']).toBe('protected')
+  })
+
+  it('sans le groupe piéton, le mouvement sécant redevient protégé', () => {
     const c = dossierController({
       phases: [phase('p1', 'Est-ouest', 20, { groups: ['V1'] }), phase('p2', 'Nord-sud', 25, { groups: ['V2'] })],
     })
-    expect(Object.keys(phaseMovements(c, c.phases[0])).sort())
-      .toEqual(['e_in>w_out', 'w_in>e_out', 'w_in>n_out'])
+    expect(phaseMovements(c, c.phases[0]))
+      .toEqual({ 'e_in>w_out': 'protected', 'w_in>e_out': 'protected', 'w_in>n_out': 'protected' })
   })
 
   it('conserve le type de vert indiqué par la phase, protégé par défaut', () => {
@@ -210,7 +239,8 @@ describe('inter-verts par couple de groupes', () => {
 
   it('dégage une traversée qui s’éteint même quand le groupe véhicule reste vert', () => {
     // Motif de la sous-phase piétonne : phase B = V1 + P1, phase C = V1. Aucun groupe ne « prend » le vert,
-    // mais le tourne-à-gauche que la traversée fermait rouvre : il lui faut le dégagement du dossier.
+    // mais le tourne-à-gauche qui cédait à la traversée y reprend le vert protégé : il lui faut le
+    // dégagement du dossier, des piétons étant encore engagés.
     const c = dossierController({
       phases: [
         phase('pA', 'Nord-sud', 20, { groups: ['V2'] }),
@@ -235,6 +265,24 @@ describe('inter-verts par couple de groupes', () => {
       interGreen: { V1: { V2: 6 }, P1: { V2: 9 }, V2: { V1: 7 } },
     })
     expect(phaseTransition(c, c.phases[1], c.phases[2])).toMatchObject({ allRed: 9, total: 9 })
+  })
+
+  it('ne réclame aucun dégagement quand le mouvement cède encore à une autre traversée', () => {
+    // P1 s'éteint mais P1B coupe la même traversée en phase suivante : le tourne-à-gauche reste permis, il
+    // ne « rouvre » pas et ne justifie aucun rouge de dégagement supplémentaire.
+    const c = dossierController({
+      phases: [
+        phase('pB', 'Est-ouest + traversée', 20, { groups: ['V1', 'P1'] }),
+        phase('pC', 'Est-ouest + autre traversée', 20, { groups: ['V1', 'P1B'] }),
+      ],
+      groups: [
+        { id: 'V1', type: 'vehicule', movements: ['w_in>e_out', 'e_in>w_out', 'w_in>n_out'] },
+        { id: 'P1', type: 'pieton', movements: ['w_in>n_out'], recall: true },
+        { id: 'P1B', type: 'pieton', movements: ['w_in>n_out'], recall: true },
+      ],
+      interGreen: { P1: { V1: 9 } },
+    })
+    expect(phaseTransition(c, c.phases[0], c.phases[1])).toMatchObject({ allRed: 0, total: 0 })
   })
 
   it('ne réclame aucun dégagement quand la traversée ne rouvre rien', () => {
@@ -353,14 +401,30 @@ describe('plans horaires', () => {
 /* ----------------------------- Validation et complétion ----------------------------- */
 
 describe('validation d’un contrôleur de dossier', () => {
-  it('distingue un mouvement fermé par un vert piéton d’un mouvement oublié', () => {
+  it('signale la capacité optimiste d’un mouvement qui cède aux piétons, sans le dire fermé', () => {
     const network = withController(dossierController())
     const anomalies = validateController(network, network.controllers.ctl)
-    // 12 mouvements au carrefour, 4 verts ; le tourne-à-gauche ouest est fermé par P1, les 7 autres sont oubliés.
+    // 12 mouvements au carrefour, 5 verts (dont le tourne-à-gauche ouest, permis sous P1) ; 7 sont oubliés.
     expect(anomalies.some((a) => a.startsWith('7 mouvement(s) jamais au vert'))).toBe(true)
-    const pieton = anomalies.find((a) => a.includes('vert piéton'))
-    expect(pieton).toContain('1 mouvement(s)')
+    // Le mouvement permis n'est plus compté comme fermé : ce serait un rouge permanent, donc une approche bloquée.
+    expect(anomalies.some((a) => a.includes('fermé(s) par un vert piéton'))).toBe(false)
+    const pieton = anomalies.find((a) => a.includes('capacité simulée est optimiste'))
+    expect(pieton).toContain('1 mouvement(s) au vert en même temps que la traversée piétonne')
     expect(pieton).toContain('Rue wc à gauche')
+  })
+
+  it('ne signale rien de piéton quand la traversée est un temps protégé', () => {
+    // P1 en phase propre : le tourne-à-gauche n'est ouvert par aucun groupe véhicule pendant le vert piéton,
+    // il est donc au rouge — pas en cession — et rien ne justifie l'avertissement de capacité optimiste.
+    const c = dossierController({
+      phases: [
+        phase('p1', 'Est-ouest', 20, { groups: ['V1'] }),
+        phase('p2', 'Traversée seule', 10, { groups: ['P1'] }),
+        phase('p3', 'Nord-sud', 25, { groups: ['V2'] }),
+      ],
+    })
+    const anomalies = validateController(withController(c), c)
+    expect(anomalies.some((a) => a.includes('capacité simulée est optimiste'))).toBe(false)
   })
 
   it('signale un groupe absent du dossier', () => {
@@ -410,7 +474,8 @@ describe('complétion des plans', () => {
     const network = withController(dossierController())
     const res = completeSignalPlans(network)
     expect(res.added).toBe(0)
-    expect(res.skipped).toBe(8)
+    // 7 orphelins : le tourne-à-gauche ouest, permis sous le vert piéton, est bel et bien desservi.
+    expect(res.skipped).toBe(7)
     expect(res.network).toBe(network) // identité préservée : aucun cache d'affichage invalidé
     expect(res.network.controllers.ctl.phases[0].movements).toEqual({})
   })

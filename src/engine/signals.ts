@@ -7,9 +7,11 @@
  * porte pas les données correspondantes :
  *  - inter-verts par couple de groupes : la durée entre deux phases dépend de la transition (§14.3) ;
  *  - plans horaires : le jeu de durées suit l'heure simulée, et ne change qu'en fin de cycle (§14.4) ;
- *  - groupes piétons : leur vert ferme les mouvements véhicules sécants (§14.5, via `phaseMovements`) ;
+ *  - groupes piétons : leur vert dégrade en vert permis (cession) les mouvements véhicules qui franchissent
+ *    la traversée, sans les fermer (§14.5, via `phaseMovements`) ;
  *  - traversées sur bouton poussoir : un groupe piéton hors rappel n'est desservi qu'une partie des cycles,
- *    tirés au sort de façon reproductible (`DEFAULT_PEDESTRIAN_CALL_SHARE`).
+ *    tirés au sort de façon reproductible (`DEFAULT_PEDESTRIAN_CALL_SHARE`) ; les cycles sans appel, les
+ *    mouvements sécants retrouvent le vert protégé.
  */
 import type { ControllerId, Network, NodeId, SignalController, SignalPlan } from '@/model/types'
 import type { ControllerState } from './protocol'
@@ -85,8 +87,8 @@ interface TransitionRuntime {
 /**
  * Tables d'états publiées pour un jeu donné de traversées desservies (« variante »).
  *
- * Une traversée sur bouton poussoir non appelée laisse ouverts les mouvements qu'elle aurait fermés : les
- * états dépendent donc du masque du cycle courant, pas seulement de la phase. Les **durées** (verts,
+ * Une traversée sur bouton poussoir non appelée rend le vert protégé aux mouvements qui lui auraient cédé :
+ * les états dépendent donc du masque du cycle courant, pas seulement de la phase. Les **durées** (verts,
  * inter-verts) n'en dépendent jamais : ne pas raccourcir un dégagement est le choix sûr, et cela garde un
  * temps de cycle constant, dont dépend le repérage du mode fixe.
  */
@@ -693,6 +695,10 @@ export class SignalEngine {
    * Elle est calculée sur le **plan en vigueur à l'appel** : une bascule de plan la change, et la simulation
    * la réévalue alors (voir `planEpoch`). Les traversées sur bouton poussoir sont comptées desservies, cas
    * le plus défavorable : la capacité annoncée est un minorant, stable d'un cycle à l'autre.
+   *
+   * Un mouvement au vert **permis** parce qu'une traversée piétonne le coupe compte comme vert : il écoule
+   * bel et bien du trafic, en cédant aux piétons (§14.5). L'exclure donnerait une part de vert nulle — donc
+   * une saturation infinie — sur une approche dont tous les mouvements franchissent une traversée.
    */
   greenShareByEdge(): Float64Array {
     const share = new Float64Array(this.g.edgeIds.length).fill(1)
