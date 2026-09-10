@@ -137,6 +137,7 @@ export function ReseauPanel(): JSX.Element {
 function ItinerairesResultat(): JSX.Element | null {
   const apercu = useAppStore((s) => s.ui.itineraires)
   const network = useAppStore((s) => s.project?.network)
+  const tool = useAppStore((s) => s.ui.tool)
   if (!apercu || !network) return null
   const store = useAppStore.getState()
   const meilleur = apercu.chemins[0]
@@ -167,7 +168,6 @@ function ItinerairesResultat(): JSX.Element | null {
                 <th className="right">{S.itineraires.temps}</th>
                 <th className="right">{S.itineraires.ecart}</th>
                 <th className="right">{S.itineraires.longueur}</th>
-                <th className="right" title={S.itineraires.carrefoursAide}>{S.itineraires.carrefours}</th>
               </tr>
             </thead>
             <tbody>
@@ -182,6 +182,17 @@ function ItinerairesResultat(): JSX.Element | null {
                   <th scope="row">
                     <span className="pastille-itineraire" style={{ background: itineraireColor(rang) }} aria-hidden="true" />
                     {rang + 1}
+                    {chemin.passage ? (
+                      // Marque discrète : le nom du point de passage élargirait la colonne au point de
+                      // pousser « Carrefours » hors du panneau. Il est écrit en toutes lettres sous le
+                      // tableau, et l'anneau de la carte le montre là où il agit.
+                      <span
+                        className="marque-passage"
+                        title={S.itineraires.passageTitre.replace('{noeud}', nodeLabel(network, chemin.passage))}
+                      >
+                        {S.itineraires.passageMarque}
+                      </span>
+                    ) : null}
                   </th>
                   <td className="right">{formatDureeTrajet(chemin.time)}</td>
                   <td className="right">
@@ -190,7 +201,6 @@ function ItinerairesResultat(): JSX.Element | null {
                       : `+ ${formatDureeTrajet(chemin.time - meilleur.time)}`}
                   </td>
                   <td className="right">{formatNumber(chemin.length / 1000, 2)} {S.unites.km}</td>
-                  <td className="right">{Math.max(0, chemin.nodes.length - 2)}</td>
                 </tr>
               ))}
             </tbody>
@@ -198,8 +208,36 @@ function ItinerairesResultat(): JSX.Element | null {
         </div>
       ) : null}
 
+      {!apercu.perime && apercu.chemins.some((c) => c.passage) ? (
+        <ul className="hint liste-passages">
+          {apercu.chemins.map((chemin, rang) => (chemin.passage ? (
+            <li key={chemin.edges.join(',')}>
+              <span className="pastille-itineraire" style={{ background: itineraireColor(rang) }} aria-hidden="true" />
+              {S.itineraires.passageLigne
+                .replace('{rang}', String(rang + 1))
+                .replace('{noeud}', nodeLabel(network, chemin.passage))}
+            </li>
+          ) : null))}
+        </ul>
+      ) : null}
+
       {apercu.chemins.length && !apercu.perime ? <p className="hint">{S.itineraires.survolAide}</p> : null}
       <p className="hint">{S.itineraires.aide}</p>
+
+      {apercu.chemins.length && !apercu.perime ? (
+        <>
+          <button
+            type="button"
+            className={tool === 'passage' ? 'button primary' : 'button'}
+            data-testid="itineraires-passage"
+            onClick={() => useAppStore.getState().setTool(tool === 'passage' ? 'select' : 'passage')}
+          >
+            {S.itineraires.passage}
+          </button>
+          {tool === 'passage' ? <p className="hint">{S.itineraires.passageAide}</p> : null}
+        </>
+      ) : null}
+
       <div className="row">
         {apercu.perime ? (
           <button type="button" className="button" data-testid="itineraires-recalculer" onClick={() => store.recalculerItineraires()}>
@@ -357,9 +395,9 @@ function NodeEditor({ nodeId }: { nodeId: NodeId }): JSX.Element | null {
   )
 }
 
-/** Étiquette courte d'un tronçon pour les en-têtes de la matrice. */
-function shortLabel(edge: NetEdge): string {
-  const name = edge.name ?? edge.id
+/** Étiquette courte pour un en-tête étroit : un nom de tronçon ou de carrefour tronqué. */
+function shortLabel(nom: NetEdge | string): string {
+  const name = typeof nom === 'string' ? nom : nom.name ?? nom.id
   return name.length > 14 ? `${name.slice(0, 13)}…` : name
 }
 

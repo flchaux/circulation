@@ -32,9 +32,11 @@ npm run extract-city -- 42323 veauche   # pré-extraire une commune dans public/
    un tronçon dont vous réglez la classe, les voies et la vitesse, caler une onde verte le long d'un axe, et
    comparer les **cinq itinéraires les plus courts** entre deux nœuds — cliquez le départ puis l'arrivée : chacun
    est surligné d'une couleur sur la carte, avec son temps de parcours en étiquette, et le panneau les classe avec
-   leur écart au plus rapide, leur longueur et le nombre de carrefours traversés. Les temps comprennent le retard
-   des feux, des stops et des cédez-le-passage rencontrés : ce sont ceux sur lesquels le moteur choisit ses
-   itinéraires. Fermez une rue et recalculez pour voir par où le trafic passera.
+   leur écart au plus rapide et leur longueur. Les temps comprennent le retard des feux, des stops et des
+   cédez-le-passage rencontrés : ce sont ceux sur lesquels le moteur choisit ses itinéraires. Un bouton ajoute
+   à cette liste un itinéraire **par un point de passage** : cliquez un nœud, et le plus court chemin qui va du
+   départ à l'arrivée en le traversant s'ajoute au classement, avec un anneau sur le nœud imposé. Fermez une rue
+   et recalculez pour voir par où le trafic passera.
 3. **Feux** : réglez les phases mouvement par mouvement, les durées de vert, l'orange, le rouge intégral, le décalage
    entre carrefours pour créer une onde verte, ou passez un carrefour en mode adaptatif. Une armoire qui commande
    un carrefour décalé — deux nœuds voisins sur le fond de carte — se déclare en regroupant ces nœuds sous le

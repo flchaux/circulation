@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import type { NetEdge, NetNode, Network } from '@/model/types'
 import type { ApercuItineraires } from '@/state/storeTypes'
 import type { Itineraire } from '@/engine/itineraires'
-import { itinerairesLesPlusCourts } from '@/engine/itineraires'
+import { itineraireParPassage, itinerairesLesPlusCourts } from '@/engine/itineraires'
 import { LABEL_ZOOM, MapRenderer, type MapScene, type RendererView } from './renderer'
 import { itineraireColor } from './colors'
 
@@ -159,6 +159,27 @@ describe('itinéraires sur la carte', () => {
     }
     // Le plus lent d'abord, le meilleur en dernier : c'est lui qui reste visible là où tous se superposent.
     expect(suite).toEqual([...attendues].reverse())
+  })
+
+  it('marque d’un anneau le nœud imposé d’un itinéraire par point de passage', () => {
+    const network = damier()
+    const vue = apercu(network)
+    const detour = itineraireParPassage(network, 'r0c0', 'r2c0', 'r2c2')!
+    expect(detour.passage).toBe('r2c0')
+    vue.chemins = [...vue.chemins, detour]
+
+    const appels = dessiner(vue)
+    // Le nœud r2c0 est en (−200 ; −200) m, soit (250 ; 650) px avec la projection de test.
+    const anneaux = appels.filter((a) => a.methode === 'arc' && a.trait === itineraireColor(5))
+    expect(anneaux).toHaveLength(1)
+    expect(Math.round(Number(anneaux[0].args[0]))).toBe(250)
+    expect(Math.round(Number(anneaux[0].args[1]))).toBe(650)
+
+    // Aucun anneau pour les cinq itinéraires les plus courts : rien ne leur est imposé. (Les nœuds du
+    // réseau sont eux aussi des arcs : on ne retient que ceux tracés à une couleur d'itinéraire.)
+    const couleurs = [0, 1, 2, 3, 4, 5].map(itineraireColor)
+    const sansPassage = dessiner(apercu(network)).filter((a) => a.methode === 'arc' && couleurs.includes(String(a.trait)))
+    expect(sansPassage).toHaveLength(0)
   })
 
   it('estompe les autres itinéraires quand l’un d’eux est mis en avant', () => {

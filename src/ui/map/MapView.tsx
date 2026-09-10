@@ -75,6 +75,7 @@ export function mapClickAction(tool: MapTool, hit: Selection): MapClickAction {
 const OUTIL_ACTIF: Record<Exclude<MapTool, 'select'>, string> = {
   greenwave: S.carte.outilOndeVerteActif,
   itineraires: S.carte.outilItinerairesActif,
+  passage: S.carte.outilPassageActif,
   addEdge: S.carte.outilAjoutTronconActif,
   addNode: S.carte.outilPoseNoeudActif,
 }

@@ -40,6 +40,11 @@ export interface Itineraire {
   time: number
   /** Longueur cumulée (m). */
   length: number
+  /**
+   * Nœud de passage imposé, si l'itinéraire vient de `itineraireParPassage`. Absent pour les itinéraires
+   * les plus courts, qui ne passent que par où ils veulent.
+   */
+  passage?: NodeId
 }
 
 export interface OptionsItineraires {
@@ -85,17 +90,20 @@ interface Depart {
 }
 
 /**
- * Dijkstra sur le graphe des tronçons, d'un ensemble d'états initiaux vers le premier tronçon qui aboutit
- * au nœud `cible`. Les nœuds marqués dans `bannis` ne peuvent pas être atteints : c'est ainsi que Yen
- * interdit à une déviation de repasser par le début du chemin qu'elle prolonge.
+ * Dijkstra sur le graphe des tronçons, depuis un ensemble d'états initiaux.
+ *
+ * `dist[e]` est le coût d'être arrivé au bout de `e` (traversée de `e` comprise), `parent[e]` le tronçon
+ * précédent. Les nœuds marqués dans `bannis` ne peuvent pas être atteints : c'est ainsi que Yen interdit à
+ * une déviation de repasser par le début du chemin qu'elle prolonge. La recherche s'arrête au premier
+ * tronçon qui aboutit à `cible`, ou explore tout le graphe si `cible` vaut −1.
  */
-function plusCourt(
+function explorerDepuis(
   g: EngineGraph,
   couts: Couts,
   departs: Depart[],
   cible: number,
   bannis: Uint8Array,
-): { edges: number[]; cost: number } | null {
+): { dist: Float64Array; parent: Int32Array; arrivee: number } {
   const n = g.edgeIds.length
   const dist = new Float64Array(n).fill(Infinity)
   const parent = new Int32Array(n).fill(-1)
@@ -125,11 +133,65 @@ function plusCourt(
       }
     }
   }
-  if (arrivee < 0) return null
+  return { dist, parent, arrivee }
+}
+
+/** Remonte la chaîne des parents jusqu'à un état initial. */
+function cheminVers(parent: Int32Array, arrivee: number): number[] {
   const edges: number[] = []
   for (let cur = arrivee; cur >= 0; cur = parent[cur]) edges.push(cur)
   edges.reverse()
-  return { edges, cost: dist[arrivee] }
+  return edges
+}
+
+function plusCourt(
+  g: EngineGraph,
+  couts: Couts,
+  departs: Depart[],
+  cible: number,
+  bannis: Uint8Array,
+): { edges: number[]; cost: number } | null {
+  const { dist, parent, arrivee } = explorerDepuis(g, couts, departs, cible, bannis)
+  if (arrivee < 0) return null
+  return { edges: cheminVers(parent, arrivee), cost: dist[arrivee] }
+}
+
+/**
+ * Dijkstra **inverse** : `cout[f]` est le coût pour aller de l'engagement sur le tronçon `f` jusqu'à
+ * l'arrivée au nœud `cible`, traversée de `f` comprise et retards des carrefours traversés compris ;
+ * `suivant[f]` est le tronçon d'après sur ce meilleur trajet (−1 si `f` aboutit à la cible).
+ *
+ * C'est la moitié aval d'un itinéraire par point de passage : combinée à la moitié amont, elle donne le
+ * meilleur trajet **pour chaque façon de traverser le carrefour de passage**, ce que deux plus courts
+ * chemins calculés séparément ne sauraient pas faire — leur jonction pourrait être un mouvement interdit.
+ */
+function explorerVers(g: EngineGraph, couts: Couts, cible: number): { cout: Float64Array; suivant: Int32Array } {
+  const n = g.edgeIds.length
+  const cout = new Float64Array(n).fill(Infinity)
+  const suivant = new Int32Array(n).fill(-1)
+  const heap = new MinHeap(64)
+  for (let k = g.inStart[cible]; k < g.inStart[cible + 1]; k++) {
+    const f = g.inList[k]
+    if (g.closed[f]) continue
+    cout[f] = couts.libre[f]
+    heap.push(cout[f], f)
+  }
+  while (heap.size > 0) {
+    const f = heap.pop()
+    const d = heap.lastKey
+    if (d > cout[f]) continue
+    for (let k = g.predStart[f]; k < g.predStart[f + 1]; k++) {
+      const p = g.movementFrom[g.predList[k]]
+      if (p < 0 || g.closed[p]) continue
+      const nd = couts.libre[p] + couts.retard[p] + d
+      if (nd < cout[p]) {
+        cout[p] = nd
+        suivant[p] = f
+        heap.push(nd, p)
+      }
+    }
+  }
+  return { cout, suivant }
 }
 
 /** Le chemin `p` commence-t-il exactement par `racine`, et va-t-il au moins un tronçon plus loin ? */
@@ -249,18 +311,81 @@ export function itinerairesLesPlusCourts(
     }
   }
 
-  return trouves.map((chemin) => {
-    let longueur = 0
-    const nodes: NodeId[] = [from]
-    for (const e of chemin.edges) {
-      longueur += g.length[e]
-      nodes.push(g.nodeIds[g.edgeToNode[e]])
-    }
-    return {
-      edges: chemin.edges.map((e) => g.edgeIds[e]),
-      nodes,
-      time: chemin.cost,
-      length: longueur,
-    }
-  })
+  return trouves.map((chemin) => construire(g, from, chemin.edges, chemin.cost))
+}
+
+/** Traduit une suite d'indices de tronçons en itinéraire lisible (identifiants, nœuds, longueur). */
+function construire(g: EngineGraph, from: NodeId, edges: number[], cost: number): Itineraire {
+  let longueur = 0
+  const nodes: NodeId[] = [from]
+  for (const e of edges) {
+    longueur += g.length[e]
+    nodes.push(g.nodeIds[g.edgeToNode[e]])
+  }
+  return { edges: edges.map((e) => g.edgeIds[e]), nodes, time: cost, length: longueur }
+}
+
+/**
+ * Le plus court itinéraire de `from` à `to` **contraint à traverser** le nœud `passage`.
+ *
+ * Ce n'est pas la concaténation du plus court chemin `from → passage` et du plus court chemin
+ * `passage → to` : leur jonction serait un mouvement quelconque au carrefour de passage, y compris un
+ * demi-tour ou un tourne-à-gauche interdit. La contrainte est donc portée par le **mouvement** : deux
+ * explorations, l'une depuis l'origine, l'autre vers la destination, puis le minimum sur les mouvements
+ * autorisés du carrefour de passage (`nodeMovements`, donc sans demi-tour hors impasse, sans mouvement
+ * interdit et vide si le nœud est frontière — on ne traverse pas une frontière, on ne peut donc pas
+ * l'imposer comme point de passage).
+ *
+ * L'itinéraire obtenu peut repasser par un tronçon déjà emprunté : c'est le propre d'un détour imposé
+ * vers un point de passage puis d'un retour, et le réseau interdisant le demi-tour, ce retour se fait par
+ * le tour du pâté de maisons. Renvoie `null` si le passage est confondu avec une extrémité, si l'un des
+ * trois nœuds est inconnu, ou si aucun itinéraire ne les enchaîne.
+ */
+export function itineraireParPassage(
+  network: Network,
+  from: NodeId,
+  passage: NodeId,
+  to: NodeId,
+  opts: OptionsItineraires = {},
+): Itineraire | null {
+  if (passage === from || passage === to || from === to) return null
+  const g = buildGraph(network)
+  const source = g.nodeOf.get(from)
+  const pivot = g.nodeOf.get(passage)
+  const cible = g.nodeOf.get(to)
+  if (source === undefined || pivot === undefined || cible === undefined) return null
+  const couts = coutsDeReference(g, network, opts.settings)
+
+  const departs: Depart[] = []
+  for (let k = g.outStart[source]; k < g.outStart[source + 1]; k++) {
+    const e = g.outList[k]
+    if (!g.closed[e]) departs.push({ edge: e, dist: couts.libre[e] })
+  }
+  if (!departs.length) return null
+
+  // Moitié amont : on interdit de revenir à l'origine, comme pour les itinéraires les plus courts.
+  const bannis = new Uint8Array(g.nodeIds.length)
+  bannis[source] = 1
+  const amont = explorerDepuis(g, couts, departs, -1, bannis)
+  const aval = explorerVers(g, couts, cible)
+
+  let meilleur = Infinity
+  let approche = -1
+  let sortie = -1
+  for (let m = g.nodeMovStart[pivot]; m < g.nodeMovStart[pivot + 1]; m++) {
+    const e = g.movementFrom[m]
+    const f = g.movementTo[m]
+    if (e < 0 || f < 0) continue
+    const total = amont.dist[e] + couts.retard[e] + aval.cout[f]
+    if (total < meilleur) { meilleur = total; approche = e; sortie = f }
+  }
+  if (approche < 0 || !Number.isFinite(meilleur)) return null
+
+  const edges = cheminVers(amont.parent, approche)
+  let garde = g.edgeIds.length + 2
+  for (let cur = sortie; cur >= 0; cur = aval.suivant[cur]) {
+    if (garde-- <= 0) return null
+    edges.push(cur)
+  }
+  return { ...construire(g, from, edges, meilleur), passage }
 }

@@ -284,6 +284,16 @@ toute la simulation (numérotation dans l'ordre des arrivées) pour permettre l'
   liste est complétée par les meilleurs candidats déjà rencontrés — ce sont de vrais itinéraires, seul leur rang
   exact n'est plus garanti. Mesure sur Veauche (1 638 tronçons), traversée de la commune de bout en bout : 5
   itinéraires en ~90 ms, calcul synchrone dans le fil de l'interface.
+- **Itinéraire par point de passage** (`itineraireParPassage(network, from, passage, to, opts)`) : le plus
+  court chemin contraint à **traverser** un nœud, ajouté à la liste précédente. Ce n'est pas la
+  concaténation de `from → passage` et `passage → to` : leur jonction serait un mouvement quelconque au
+  carrefour de passage, demi-tour ou tourne-à-gauche interdit compris. La contrainte porte donc le
+  **mouvement** : une exploration depuis l'origine, une exploration inverse vers la destination (`cout[f]` =
+  coût de l'engagement sur `f` jusqu'à l'arrivée), puis le minimum de `amont[e] + retard[e] + aval[f]` sur
+  les mouvements autorisés du nœud de passage. Un nœud frontière n'a aucun mouvement : il ne peut donc pas
+  être imposé, ce qui est la bonne réponse — on ne le traverse pas. L'itinéraire obtenu peut réemprunter un
+  tronçon déjà parcouru (détour puis retour, le demi-tour restant interdit) ; c'est le propre d'un passage
+  imposé, et le seul cas où un itinéraire de la liste n'est pas élémentaire.
 
 ### 5.6 Priorités hors feux (`priority.ts`)
 Pour chaque nœud non signalisé (ou `flashing`/`off`), précalculer par mouvement `m` la liste des mouvements auxquels il cède.
@@ -402,7 +412,10 @@ carte à droite avec légende (mode de couleur) et bascule fond de carte / véhi
   n'appartient qu'à cet itinéraire — au milieu du trajet, les cinq étiquettes se superposeraient sur la partie
   commune. Survoler une ligne du tableau (`ui.itineraires.actif`) met son itinéraire au premier plan et estompe
   les autres. Un aperçu périmé (réseau modifié depuis le calcul) n'est pas dessiné : `MapView` le remplace par
-  `null` dans la scène et le panneau propose de recalculer.
+  `null` dans la scène et le panneau propose de recalculer. Un itinéraire par point de passage porte en plus
+  un anneau à sa couleur sur le nœud imposé : sans lui, on lirait bien qu'il est plus long, mais pas où il a
+  été obligé de passer. La palette compte huit teintes et non cinq, chaque point de passage ajoutant un
+  itinéraire à la liste.
 - Étiquettes : les valeurs sont posées d'abord, les noms de rue ensuite (repli, une fois par nom), dans une grille d'occupation
   qui réserve le **rectangle** de chaque étiquette — un nom ne prend donc jamais la place d'un chiffre et rien ne se chevauche.
   Les deux sens d'un tronçon à double sens tiennent dans une **seule** étiquette à deux lignes, posée entre les deux chaussées,
@@ -424,8 +437,12 @@ carte à droite avec légende (mode de couleur) et bascule fond de carte / véhi
   d'interdictions de tourner (approches × sorties), supprimer. Tronçon : nom, classe, voies, vitesse (avec badge « estimée »),
   sens (sens unique / inverser / double sens), fermé, appliquer aussi au sens opposé, supprimer. Sans sélection : aide + outils
   (poser un nœud, ajouter un tronçon, onde verte, itinéraires). Sous les outils, le résultat de l'outil
-  « itinéraires » : les cinq chemins classés (rang et pastille de couleur, temps, écart au plus rapide, longueur,
-  carrefours traversés), le survol d'une ligne mettant l'itinéraire correspondant en avant sur la carte. Le bloc
+  « itinéraires » : les cinq chemins classés (rang et pastille de couleur, temps, écart au plus rapide,
+  longueur), le survol d'une ligne mettant l'itinéraire correspondant en avant sur la carte, et un bouton
+  « ajouter un itinéraire par un point de passage » qui arme un outil à **un seul clic** : le nœud cliqué
+  devient un passage imposé, l'itinéraire correspondant prend son rang au temps dans la même liste et est
+  mis en avant. Un passage déjà situé sur un itinéraire de la liste ne le duplique pas : celui qui répond
+  déjà à la question est mis en avant, et on le dit. Le bloc
   survit au changement d'outil — la comparaison sert à décider d'une modification, qu'il faut pouvoir faire sans
   perdre la réponse — mais pas à une modification du réseau, qui le périme et propose un recalcul.
 - **Feux** : liste des contrôleurs (nom, nœuds, cycle, mode, avertissements de validation) ; éditeur : mode, décalage, orange,
@@ -509,6 +526,7 @@ export interface Itineraire {
   nodes: NodeId[]        // nœuds traversés (edges.length + 1)
   time: number           // temps à réseau vide (s), retard des carrefours traversés compris
   length: number         // longueur cumulée (m)
+  passage?: NodeId       // nœud de passage imposé (itineraireParPassage), absent sinon
 }
 export function itinerairesLesPlusCourts(
   network: Network,
@@ -516,6 +534,13 @@ export function itinerairesLesPlusCourts(
   to: NodeId,
   opts?: { count?: number; settings?: SimSettings },
 ): Itineraire[]          // du plus rapide au plus lent ; [] si nœuds confondus, inconnus ou non reliés
+export function itineraireParPassage(
+  network: Network,
+  from: NodeId,
+  passage: NodeId,       // nœud à traverser ; ni le départ, ni l'arrivée, ni un nœud frontière
+  to: NodeId,
+  opts?: { count?: number; settings?: SimSettings },
+): Itineraire | null     // `passage` renseigné sur l'itinéraire rendu ; null si aucun ne le traverse
 
 // src/engine/simulation.ts                                                         [B]
 export class Simulation {

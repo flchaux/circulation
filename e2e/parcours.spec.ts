@@ -597,6 +597,53 @@ test('les cinq itinéraires les plus courts se comparent entre deux nœuds cliqu
   })
   expect(rubanVisible, 'le ruban du meilleur itinéraire doit être visible sur la carte').toBe(true)
 
+  // Un point de passage ajoute à la liste le meilleur itinéraire qui traverse le nœud cliqué.
+  await page.getByTestId('itineraires-passage').click()
+  const passage = await withDebug(page, (d) => {
+    const s = d.store.getState()
+    const net = s.project.network
+    const empruntes = new Set<string>()
+    for (const c of s.ui.itineraires.chemins) for (const n of c.nodes) empruntes.add(n)
+    // Un nœud à l'écart des cinq itinéraires : le détour qu'il impose sera un vrai ajout à la liste.
+    // Il doit rester dans la zone centrale de la carte : les bandes de bord portent la légende, les
+    // bascules d'affichage et l'attribution OpenStreetMap, dont le lien emmènerait le test ailleurs.
+    const taille = d.map.getSize()
+    const depart = net.nodes[s.ui.itineraires.from]
+    let choisi: string | null = null
+    let meilleure = 0
+    for (const [id, n] of Object.entries(net.nodes) as [string, any][]) {
+      if (n.boundary || empruntes.has(id)) continue
+      const ll = d.projection!.toLonLat(n.x, n.y)
+      const p = d.map.latLngToContainerPoint([ll.lat, ll.lon])
+      if (p.x < 80 || p.x > taille.x - 80 || p.y < 140 || p.y > taille.y - 140) continue
+      // Le plus éloigné du départ parmi ceux qui restent visibles : le détour sera net.
+      const dist = Math.hypot(n.x - depart.x, n.y - depart.y)
+      if (dist > meilleure) { meilleure = dist; choisi = id }
+    }
+    if (!choisi) return null
+    const n = net.nodes[choisi]
+    const ll = d.projection!.toLonLat(n.x, n.y)
+    const p = d.map.latLngToContainerPoint([ll.lat, ll.lon])
+    return { id: choisi, px: p.x, py: p.y }
+  }, null)
+  expect(passage, 'un nœud hors des cinq itinéraires doit être visible').not.toBeNull()
+  await page.mouse.click(boite!.x + passage!.px, boite!.y + passage!.py)
+
+  const avecPassage = await withDebug(page, (d) => {
+    const a = d.store.getState().ui.itineraires
+    return {
+      total: a.chemins.length as number,
+      passages: a.chemins.filter((c: any) => c.passage).map((c: any) => c.passage as string),
+      traverse: a.chemins.some((c: any) => c.passage && c.nodes.includes(c.passage)) as boolean,
+      croissants: a.chemins.every((c: any, i: number) => i === 0 || c.time >= a.chemins[i - 1].time) as boolean,
+    }
+  }, null)
+  expect(avecPassage.total).toBe(6)
+  expect(avecPassage.passages).toEqual([passage!.id])
+  expect(avecPassage.traverse).toBe(true)
+  expect(avecPassage.croissants, 'la liste reste classée du plus rapide au plus lent').toBe(true)
+  await expect(page.getByTestId('itineraire-5')).toBeVisible()
+
   // Une modification du réseau périme la comparaison plutôt que d'afficher des temps devenus faux.
   await withDebug(page, (d) => {
     const s = d.store.getState()

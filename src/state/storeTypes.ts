@@ -25,11 +25,12 @@ export type ColorMode = 'class' | 'flow' | 'delay' | 'saturation' | 'speed' | 'q
 export type SidebarTab = 'ville' | 'reseau' | 'feux' | 'trafic' | 'resultats' | 'comparer'
 /**
  * Outil carte : sélection/déplacement, tracé d'onde verte (clic sur deux nœuds), comparaison des cinq
- * itinéraires les plus courts entre deux nœuds (clic sur deux nœuds, voir `calculerItineraires`), ajout de
- * tronçon (clic sur deux nœuds), pose d'un nœud libre (**un seul clic, n'importe où sur la carte** : c'est
- * le seul outil qui n'attend pas de clic sur un nœud existant, voir `addNode`).
+ * itinéraires les plus courts entre deux nœuds (clic sur deux nœuds, voir `calculerItineraires`), point de
+ * passage ajouté à cette comparaison (**un seul clic sur un nœud**, voir `ajouterItineraireParPassage`),
+ * ajout de tronçon (clic sur deux nœuds), pose d'un nœud libre (**un seul clic, n'importe où sur la
+ * carte** : c'est le seul outil qui n'attend pas de clic sur un nœud existant, voir `addNode`).
  */
-export type MapTool = 'select' | 'greenwave' | 'itineraires' | 'addEdge' | 'addNode'
+export type MapTool = 'select' | 'greenwave' | 'itineraires' | 'passage' | 'addEdge' | 'addNode'
 
 /**
  * Résultat de l'outil « itinéraires » : les chemins les plus courts d'un nœud à un autre, surlignés sur la
@@ -41,7 +42,10 @@ export type MapTool = 'select' | 'greenwave' | 'itineraires' | 'addEdge' | 'addN
 export interface ApercuItineraires {
   from: NodeId
   to: NodeId
-  /** Du plus rapide au plus lent ; vide si aucun chemin ne relie les deux nœuds. */
+  /**
+   * Du plus rapide au plus lent ; vide si aucun chemin ne relie les deux nœuds. Les itinéraires ajoutés
+   * par un point de passage (`Itineraire.passage`) y prennent leur rang au temps, comme les autres.
+   */
   chemins: Itineraire[]
   /**
    * Le réseau a changé depuis le calcul : les itinéraires ne sont plus dessinés et le panneau propose de
@@ -241,6 +245,13 @@ export interface AppState {
   calculerItineraires(fromNode: NodeId, toNode: NodeId): void
   /** Relance le calcul sur le réseau courant (après une modification qui l'a rendu périmé). */
   recalculerItineraires(): void
+  /**
+   * Ajoute à la liste le plus court itinéraire qui va du départ à l'arrivée **en traversant** `via`, à sa
+   * place dans le classement au temps, et le met en avant. Sans effet, avec une erreur qui l'explique, si
+   * aucun itinéraire ne l'emprunte, si `via` est l'une des deux extrémités, ou si la liste est périmée.
+   * Un itinéraire déjà présent n'est pas dupliqué : il est simplement mis en avant.
+   */
+  ajouterItineraireParPassage(via: NodeId): void
   /** Retire les itinéraires de la carte et du panneau. */
   effacerItineraires(): void
   /** Met un itinéraire en avant (survol de la liste) ; `-1` les remet tous au même plan. */

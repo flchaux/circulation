@@ -72,12 +72,17 @@ export const TOOL_COLOR = '#12a150'
 /**
  * Couleurs des itinéraires comparés, du plus rapide au plus lent (outil « itinéraires »).
  *
- * Cinq teintes franchement séparées, et non une rampe du meilleur au pire : les itinéraires se recouvrent
+ * Des teintes franchement séparées, et non une rampe du meilleur au pire : les itinéraires se recouvrent
  * sur une bonne part de leur longueur, et c'est justement là où ils divergent qu'il faut pouvoir dire d'un
  * coup d'œil lequel est lequel. Aucune n'est celle de la sélection (bleu) ni celle des outils (vert), qui
  * peuvent être affichées en même temps.
+ *
+ * Huit et non cinq : la liste en compte cinq au départ, mais chaque point de passage en ajoute un, et deux
+ * itinéraires de la même couleur seraient indépartageables sur la carte.
  */
-export const ITINERAIRE_COLORS = ['#d1495b', '#1b6ca8', '#e08b1e', '#6b3fa0', '#0f8f6f']
+export const ITINERAIRE_COLORS = [
+  '#d1495b', '#1b6ca8', '#e08b1e', '#6b3fa0', '#0f8f6f', '#a4036f', '#7f4f24', '#3f6212',
+]
 
 /** Couleur d'un itinéraire de rang `i` (0 = le plus rapide) ; les rangs au-delà reprennent la série. */
 export function itineraireColor(rang: number): string {

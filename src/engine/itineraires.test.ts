@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { NetEdge, NetNode, Network } from '@/model/types'
 import { DEFAULT_SETTINGS } from '@/model/defaults'
-import { itinerairesLesPlusCourts } from './itineraires'
+import { itineraireParPassage, itinerairesLesPlusCourts } from './itineraires'
 
 function node(id: string, x: number, y: number, boundary = false): NetNode {
   return { id, x, y, boundary }
@@ -152,5 +152,70 @@ describe('itinerairesLesPlusCourts', () => {
     const net = damier(4)
     expect(itinerairesLesPlusCourts(net, 'r0c0', 'r3c3', { count: 3 })).toHaveLength(3)
     expect(itinerairesLesPlusCourts(net, 'r0c0', 'r3c3', { count: 8 })).toHaveLength(8)
+  })
+})
+
+describe('itineraireParPassage', () => {
+  it('impose la traversée du nœud demandé, au meilleur coût', () => {
+    const net = damier(3)
+    // Sans contrainte, le trajet ne passe pas par le coin nord-est.
+    const [libre] = itinerairesLesPlusCourts(net, 'r0c0', 'r2c0')
+    expect(libre.nodes).not.toContain('r0c2')
+
+    const detour = itineraireParPassage(net, 'r0c0', 'r0c2', 'r2c0')!
+    expect(detour).not.toBeNull()
+    expect(detour.passage).toBe('r0c2')
+    expect(detour.nodes).toContain('r0c2')
+    verifierChemin(net, detour, 'r0c0', 'r2c0')
+    // Aller-retour par la rangée du haut : 400 m de plus que les 200 m du trajet direct.
+    expect(detour.length).toBeCloseTo(600, 6)
+    expect(detour.time).toBeGreaterThan(libre.time)
+  })
+
+  it('rend le même itinéraire que le plus court quand le point de passage est déjà dessus', () => {
+    const net = damier(3)
+    const [direct] = itinerairesLesPlusCourts(net, 'r0c0', 'r0c2')
+    const parMilieu = itineraireParPassage(net, 'r0c0', 'r0c1', 'r0c2')!
+    expect(parMilieu.edges).toEqual(direct.edges)
+    expect(parMilieu.time).toBeCloseTo(direct.time, 6)
+  })
+
+  it('choisit une traversée autorisée du carrefour de passage, jamais un mouvement interdit', () => {
+    const net = damier(3)
+    // Au carrefour de passage r1c1, venir du nord et repartir à l'ouest est interdit.
+    net.edges['r0c1>r1c1'] = { ...net.edges['r0c1>r1c1'], bannedTo: ['r1c1>r1c0'] }
+    const chemin = itineraireParPassage(net, 'r0c1', 'r1c1', 'r1c0')!
+    expect(chemin).not.toBeNull()
+    verifierChemin(net, chemin, 'r0c1', 'r1c0')
+    expect(chemin.nodes).toContain('r1c1')
+    const i = chemin.edges.indexOf('r0c1>r1c1')
+    if (i >= 0) expect(chemin.edges[i + 1]).not.toBe('r1c1>r1c0')
+  })
+
+  it('refuse un point de passage confondu avec une extrémité, inconnu ou frontière', () => {
+    const net = damier(3)
+    expect(itineraireParPassage(net, 'r0c0', 'r0c0', 'r2c2')).toBeNull()
+    expect(itineraireParPassage(net, 'r0c0', 'r2c2', 'r2c2')).toBeNull()
+    expect(itineraireParPassage(net, 'r0c0', 'inconnu', 'r2c2')).toBeNull()
+    // Un nœud frontière ne se traverse pas : il ne peut pas être imposé comme passage.
+    net.nodes.r1c1 = { ...net.nodes.r1c1, boundary: true }
+    expect(itineraireParPassage(net, 'r0c0', 'r1c1', 'r2c2')).toBeNull()
+  })
+
+  it('compte le retard des carrefours traversés, celui du point de passage compris', () => {
+    const net = damier(3)
+    const sans = itineraireParPassage(net, 'r0c0', 'r0c2', 'r2c0')!
+    const avec = itineraireParPassage(net, 'r0c0', 'r0c2', 'r2c0', { settings: DEFAULT_SETTINGS })!
+    // Le damier offre plusieurs détours de même longueur : le retard des carrefours peut départager
+    // autrement que le seul temps à vide, mais le trajet reste un aller-retour de 600 m par le passage.
+    expect(avec.length).toBeCloseTo(sans.length, 6)
+    expect(avec.nodes).toContain('r0c2')
+    expect(avec.time).toBeGreaterThan(sans.time)
+  })
+
+  it('renvoie null quand le point de passage n’est pas atteignable', () => {
+    const net = damier(3)
+    for (const id of ['r0c1>r0c2', 'r1c2>r0c2']) net.edges[id] = { ...net.edges[id], closed: true }
+    expect(itineraireParPassage(net, 'r0c0', 'r0c2', 'r2c0')).toBeNull()
   })
 })

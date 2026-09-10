@@ -947,8 +947,38 @@ input[type='checkbox'] {
   vertical-align: baseline;
 }
 
+/* Rang : la pastille, le numéro et la marque de passage tiennent sur une ligne. */
 .data-table.itineraires th[scope='row'] {
   min-width: 0;
+  white-space: nowrap;
+}
+
+/*
+ * Les intitulés de ce tableau sont du texte, non des boutons de tri : la règle générale (`padding: 0`
+ * sur `thead th`, le bouton portant la marge) les collerait les uns aux autres — « ÉcartLongueur ».
+ */
+.data-table.itineraires thead th {
+  padding: 4px 6px;
+}
+
+.data-table.itineraires thead th.right {
+  padding-left: 10px;
+}
+
+/* Point de passage imposé : une marque à côté du rang, le nom étant écrit sous le tableau. */
+.marque-passage {
+  margin-left: 3px;
+  color: var(--texte-doux);
+  cursor: help;
+}
+
+.liste-passages {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .data-table.itineraires tbody tr.active {

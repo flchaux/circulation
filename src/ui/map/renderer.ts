@@ -1014,6 +1014,25 @@ export class MapRenderer {
     if (actif >= 0 && actif < apercu.chemins.length) {
       this.strokeItineraire(ctx, scene, apercu.chemins[actif], actif, 0.92)
     }
+    // Points de passage imposés : un anneau à la couleur de l'itinéraire, sur le nœud qui le contraint.
+    // Sans lui, on lirait bien qu'un itinéraire est plus long, mais pas où il a été obligé de passer.
+    for (let rang = 0; rang < apercu.chemins.length; rang++) {
+      const passage = apercu.chemins[rang].passage
+      if (!passage) continue
+      const node = scene.network.nodes[passage]
+      if (!node) continue
+      const [px, py] = this.nodePosition(scene, passage, node.x, node.y)
+      ctx.save()
+      ctx.globalAlpha = actif < 0 || rang === actif ? 1 : 0.35
+      ctx.fillStyle = COLOR_NODE_FILL
+      ctx.strokeStyle = itineraireColor(rang)
+      ctx.lineWidth = 3
+      ctx.beginPath()
+      ctx.arc(px - this.view.originX, py - this.view.originY, 6, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+      ctx.restore()
+    }
     // Étiquettes après tous les rubans : aucune n'est recouverte par un tracé.
     const grid = new LabelGrid()
     ctx.textAlign = 'center'

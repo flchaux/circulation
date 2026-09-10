@@ -17,11 +17,11 @@ function node(id: string, x: number, y: number, boundary = false): NetNode {
   return { id, x, y, boundary }
 }
 
-/** Damier 3 × 3 de rues à double sens espacées de 100 m : plusieurs itinéraires d'un coin à l'autre. */
-function damier(): Network {
+/** Damier de rues à double sens espacées de 100 m : plusieurs itinéraires d'un coin à l'autre. */
+function damier(cote = 3): Network {
   const nodes: Record<string, NetNode> = {}
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 3; c++) nodes[`r${r}c${c}`] = node(`r${r}c${c}`, c * 100, -r * 100)
+  for (let r = 0; r < cote; r++) {
+    for (let c = 0; c < cote; c++) nodes[`r${r}c${c}`] = node(`r${r}c${c}`, c * 100, -r * 100)
   }
   const edges: Record<string, NetEdge> = {}
   const relier = (a: string, b: string): void => {
@@ -34,10 +34,10 @@ function damier(): Network {
       }
     }
   }
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 3; c++) {
-      if (c + 1 < 3) relier(`r${r}c${c}`, `r${r}c${c + 1}`)
-      if (r + 1 < 3) relier(`r${r}c${c}`, `r${r + 1}c${c}`)
+  for (let r = 0; r < cote; r++) {
+    for (let c = 0; c < cote; c++) {
+      if (c + 1 < cote) relier(`r${r}c${c}`, `r${r}c${c + 1}`)
+      if (r + 1 < cote) relier(`r${r}c${c}`, `r${r + 1}c${c}`)
     }
   }
   return { nodes, edges, controls: {}, controllers: {} }
@@ -151,10 +151,81 @@ describe('outil itinéraires', () => {
     expect(avecStop).toBeGreaterThan(sansStop)
   })
 
+  it('ajoute un itinéraire par un point de passage, à son rang au temps', () => {
+    const store = setup(damier(4))
+    // Trajet le long de la rangée du haut, point de passage au coin opposé : un détour qu'aucun des cinq
+    // itinéraires les plus courts n'emprunte.
+    store.getState().calculerItineraires('r0c0', 'r0c3')
+    const avant = store.getState().ui.itineraires!.chemins.length
+
+    store.getState().setTool('passage')
+    // Un seul clic suffit : le nœud cliqué est le point de passage.
+    store.getState().toolClickNode('r3c3')
+    const apercu = store.getState().ui.itineraires!
+    expect(apercu.chemins).toHaveLength(avant + 1)
+    expect(store.getState().ui.toolNodes).toEqual([])
+    expect(store.getState().ui.tool).toBe('passage')
+
+    const ajoute = apercu.chemins.find((c) => c.passage === 'r3c3')!
+    expect(ajoute).toBeDefined()
+    expect(ajoute.nodes).toContain('r3c3')
+    // Il est mis en avant, et la liste reste classée du plus rapide au plus lent.
+    expect(apercu.chemins[apercu.actif]).toBe(ajoute)
+    for (let i = 1; i < apercu.chemins.length; i++) {
+      expect(apercu.chemins[i].time).toBeGreaterThanOrEqual(apercu.chemins[i - 1].time)
+    }
+  })
+
+  it('ne duplique pas un itinéraire dont le point de passage est déjà sur le trajet', () => {
+    const store = setup()
+    store.getState().calculerItineraires('r0c0', 'r0c2')
+    const avant = store.getState().ui.itineraires!.chemins.length
+    store.getState().ajouterItineraireParPassage('r0c1')
+    const apercu = store.getState().ui.itineraires!
+    expect(apercu.chemins).toHaveLength(avant)
+    // L'itinéraire qui répond déjà à la question est mis en avant, et on le dit.
+    expect(apercu.actif).toBeGreaterThanOrEqual(0)
+    expect(apercu.chemins[apercu.actif].nodes).toContain('r0c1')
+    expect(store.getState().error).toMatch(/déjà dans la liste/i)
+  })
+
+  it('refuse un point de passage confondu avec une extrémité ou inatteignable', () => {
+    const network = damier()
+    network.nodes.isole = node('isole', 999, 999)
+    const store = setup(network)
+    store.getState().calculerItineraires('r0c0', 'r2c2')
+    const avant = store.getState().ui.itineraires!.chemins.length
+
+    store.getState().ajouterItineraireParPassage('r0c0')
+    expect(store.getState().error).toMatch(/différent du départ/i)
+    expect(store.getState().ui.itineraires!.chemins).toHaveLength(avant)
+
+    store.getState().clearError()
+    store.getState().ajouterItineraireParPassage('isole')
+    expect(store.getState().error).toMatch(/aucun itinéraire/i)
+    expect(store.getState().ui.itineraires!.chemins).toHaveLength(avant)
+  })
+
+  it('périme aussi les itinéraires ajoutés par un point de passage', () => {
+    const store = setup(damier(4))
+    store.getState().calculerItineraires('r0c0', 'r0c3')
+    store.getState().ajouterItineraireParPassage('r3c3')
+    expect(store.getState().ui.itineraires!.chemins.some((c) => c.passage)).toBe(true)
+
+    store.getState().updateEdge('r0c0>r0c1', { closed: true })
+    expect(store.getState().ui.itineraires!.perime).toBe(true)
+    // Le recalcul repart des deux extrémités : les points de passage étaient une question, pas un réglage.
+    store.getState().recalculerItineraires()
+    const apres = store.getState().ui.itineraires!
+    expect(apres.perime).toBe(false)
+    expect(apres.chemins.some((c) => c.passage)).toBe(false)
+  })
+
   it('est proposé par le panneau Réseau et surligné par la carte', () => {
     const panneau = readFileSync('src/ui/panels/ReseauPanel.tsx', 'utf8')
     expect(panneau).toContain("setTool('itineraires')")
     expect(panneau).toContain('ItinerairesResultat')
+    expect(panneau).toContain("setTool(tool === 'passage' ? 'select' : 'passage')")
     const renderer = readFileSync('src/ui/map/renderer.ts', 'utf8')
     expect(renderer).toContain('drawItineraires')
     const carte = readFileSync('src/ui/map/MapView.tsx', 'utf8')

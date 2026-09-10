@@ -23,7 +23,7 @@ import { completeSignalPlans, controllerCycle, createDefaultSignalPlan, nextCont
 import { validateProject } from '@/model/schema'
 import type { FromWorker, SimClientFactory, SimClientLike } from '@/engine/protocol'
 import { shortestPathNodes } from '@/engine/routing'
-import { NB_ITINERAIRES, itinerairesLesPlusCourts } from '@/engine/itineraires'
+import { NB_ITINERAIRES, itineraireParPassage, itinerairesLesPlusCourts } from '@/engine/itineraires'
 import { SimClient } from '@/engine/client'
 import type { OsmExtract } from '@/geo/types'
 import { importDossierFeux as lireDossierFeux } from '@/geo/dossierFeux'
@@ -995,6 +995,37 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         if (apercu) get().calculerItineraires(apercu.from, apercu.to)
       },
 
+      ajouterItineraireParPassage(via: NodeId): void {
+        const state = get()
+        const project = state.project
+        const apercu = state.ui.itineraires
+        if (!project || !apercu || apercu.perime) return
+        if (via === apercu.from || via === apercu.to) {
+          set({ error: 'Le point de passage doit être un nœud différent du départ et de l’arrivée.' })
+          return
+        }
+        const chemin = itineraireParPassage(project.network, apercu.from, via, apercu.to, { settings: project.settings })
+        if (!chemin) {
+          set({ error: 'Aucun itinéraire ne va du départ à l’arrivée en traversant ce nœud : il est isolé, frontière, ou coupé du reste par des sens uniques ou des tronçons fermés.' })
+          return
+        }
+        const cle = (c: { edges: EdgeId[] }): string => c.edges.join(',')
+        const deja = apercu.chemins.findIndex((c) => cle(c) === cle(chemin))
+        if (deja >= 0) {
+          // Le point de passage est déjà sur un itinéraire de la liste : l'ajouter en double n'apprendrait
+          // rien. On met en avant celui qui répond déjà à la question posée.
+          set((s) => ({
+            ui: { ...s.ui, itineraires: { ...apercu, actif: deja } },
+            error: 'Cet itinéraire est déjà dans la liste : il passe déjà par ce nœud.',
+          }))
+          return
+        }
+        // Rang au temps, comme les autres : la liste reste lisible du plus rapide au plus lent. Le tri de
+        // JavaScript étant stable, deux itinéraires de même temps gardent leur ordre d'arrivée.
+        const chemins = [...apercu.chemins, chemin].sort((a, b) => a.time - b.time)
+        set((s) => ({ ui: { ...s.ui, itineraires: { ...apercu, chemins, actif: chemins.indexOf(chemin) } } }))
+      },
+
       effacerItineraires(): void {
         set((s) => (s.ui.itineraires ? { ui: { ...s.ui, itineraires: null } } : {}))
       },
@@ -1289,6 +1320,12 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         if (!state.project?.network.nodes[nodeId]) return
         if (state.ui.tool === 'select') {
           state.select({ kind: 'node', id: nodeId })
+          return
+        }
+        // Outil à un seul clic : le nœud cliqué est le point de passage, l'outil reste actif pour en
+        // ajouter d'autres.
+        if (state.ui.tool === 'passage') {
+          state.ajouterItineraireParPassage(nodeId)
           return
         }
         const toolNodes = state.ui.toolNodes.includes(nodeId) ? state.ui.toolNodes : [...state.ui.toolNodes, nodeId]
