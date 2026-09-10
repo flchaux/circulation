@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, defaultDemand } from '@/model/defaults'
-import { controllerCycle } from '@/model/signals'
+import { controllerCycle, controllerMovements } from '@/model/signals'
 import type { NetEdge, NetNode, Network, Project, SimResults } from '@/model/types'
 import { PROJECT_FORMAT, PROJECT_VERSION } from '@/model/types'
 import type { FromWorker, SimClientFactory, ToWorker } from '@/engine/protocol'
@@ -427,6 +427,55 @@ describe('glisser hors du projet', () => {
     expect(s().project?.network.nodes.nW).toBeUndefined()
     expect(s().canUndo).toBe(true)
     expect(s().project?.changes[0].label).toContain('Fusion')
+  })
+})
+
+describe('regroupement de carrefours sous un même contrôleur', () => {
+  /** Deux carrefours à feux voisins sur le même axe, chacun avec son contrôleur. */
+  function deuxFeux() {
+    const ctx = setup(corridorNetwork())
+    ctx.s().setNodeControl('n1', { type: 'signals' })
+    ctx.s().setNodeControl('n2', { type: 'signals' })
+    const net = ctx.s().project!.network
+    const c1 = net.controls.n1?.controllerId ?? ''
+    const c2 = net.controls.n2?.controllerId ?? ''
+    expect(c1 && c2 && c1 !== c2).toBeTruthy()
+    return { ...ctx, c1, c2 }
+  }
+
+  it('reprend le nœud à son ancien contrôleur, qui disparaît faute de nœud', () => {
+    const { store, s, c1, c2 } = deuxFeux()
+    expectUndoRedo(store, () => s().setControllerNodes(c1, ['n1', 'n2']), () => {
+      const net = s().project!.network
+      expect(net.controllers[c1].nodeIds).toEqual(['n1', 'n2'])
+      // Un nœud n'appartient qu'à un contrôleur : le second n'a plus rien à piloter.
+      expect(net.controllers[c2]).toBeUndefined()
+      expect(net.controls.n2).toEqual({ nodeId: 'n2', type: 'signals', controllerId: c1 })
+    })
+  })
+
+  it('cesse de compter comme branche le tronçon intérieur au regroupement', () => {
+    const { s, c1 } = deuxFeux()
+    const avant = controllerMovements(s().project!.network, s().project!.network.controllers[c1])
+    expect(avant.some((m) => m.from === 'nWn1')).toBe(true)
+
+    s().setControllerNodes(c1, ['n1', 'n2'])
+    const net = s().project!.network
+    const apres = controllerMovements(net, net.controllers[c1])
+    // Les mouvements des deux nœuds sont réunis, sauf ceux qui arrivent par le tronçon central :
+    // à l'intérieur d'un carrefour regroupé, ce n'est pas une approche.
+    expect(apres.some((m) => m.from === 'n1n2' || m.from === 'n2n1')).toBe(false)
+    expect(apres.some((m) => m.from === 'nWn1')).toBe(true)
+    expect(apres.some((m) => m.from === 'nEn2')).toBe(true)
+  })
+
+  it('rend sa régulation ordinaire au nœud retiré du regroupement', () => {
+    const { s, c1 } = deuxFeux()
+    s().setControllerNodes(c1, ['n1', 'n2'])
+    s().setControllerNodes(c1, ['n1'])
+    const net = s().project!.network
+    expect(net.controllers[c1].nodeIds).toEqual(['n1'])
+    expect(net.controls.n2).toBeUndefined()
   })
 })
 

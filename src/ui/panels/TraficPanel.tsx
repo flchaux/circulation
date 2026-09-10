@@ -7,8 +7,10 @@ import type { JSX } from 'react'
 import { useAppStore } from '@/state/store'
 import type { Demand, Network, NodeId } from '@/model/types'
 import type { CsvImportReport } from '@/state/storeTypes'
+import { ChampRecherche } from '@/ui/components/ChampRecherche'
 import { NumberField } from '@/ui/components/NumberField'
-import { S, downloadText, exportFileName, formatNumber, formatPercent } from '@/ui/strings'
+import { SEUIL_RECHERCHE, filtrer } from '@/ui/components/recherche'
+import { DAY_LABELS, S, downloadText, exportFileName, formatNumber, formatPercent, heureInput } from '@/ui/strings'
 
 /** Au-delà, la matrice origine-destination n'est plus affichable ligne à ligne. */
 const MAX_OD_CELLS = 2500
@@ -44,6 +46,8 @@ function CellNumber(props: { value: number; min?: number; onCommit(v: number): v
 export function TraficPanel(): JSX.Element {
   const project = useAppStore((s) => s.project)
   const [report, setReport] = useState<CsvImportReport | null>(null)
+  const [rechercheEntrees, setRechercheEntrees] = useState('')
+  const [rechercheSorties, setRechercheSorties] = useState('')
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   const entryIds = useMemo(
@@ -61,6 +65,10 @@ export function TraficPanel(): JSX.Element {
   const store = useAppStore.getState()
   const totalFlow = entryIds.reduce((sum, id) => sum + (demand.entries[id].enabled ? demand.entries[id].flow : 0), 0)
   const odCells = entryIds.length * exitIds.length
+  // La recherche ne masque que les lignes des deux tableaux : le total affiché et la matrice
+  // origine-destination portent toujours sur l'ensemble des entrées et des sorties.
+  const entreesVues = filtrer(entryIds, rechercheEntrees, (id) => [label(demand, network, id, 'entry')])
+  const sortiesVues = filtrer(exitIds, rechercheSorties, (id) => [label(demand, network, id, 'exit')])
 
   return (
     <div className="panel">
@@ -88,6 +96,14 @@ export function TraficPanel(): JSX.Element {
 
       <section className="block">
         <h3>{S.trafic.entrees} · {formatNumber(totalFlow)} {S.unites.vehH}</h3>
+        {entryIds.length >= SEUIL_RECHERCHE ? (
+          <ChampRecherche
+            value={rechercheEntrees}
+            onChange={setRechercheEntrees}
+            label={S.trafic.entrees}
+            testId="recherche-entrees"
+          />
+        ) : null}
         {entryIds.length ? (
           <div className="table-wrap">
             <table className="data-table">
@@ -99,7 +115,7 @@ export function TraficPanel(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {entryIds.map((id) => {
+                {entreesVues.map((id) => {
                   const entry = demand.entries[id]
                   const name = label(demand, network, id, 'entry')
                   return (
@@ -124,6 +140,7 @@ export function TraficPanel(): JSX.Element {
                 })}
               </tbody>
             </table>
+            {!entreesVues.length ? <p className="table-note">{S.recherche.aucune}</p> : null}
           </div>
         ) : (
           <p className="hint">{S.trafic.aucuneEntree}</p>
@@ -139,6 +156,14 @@ export function TraficPanel(): JSX.Element {
             <option value="od">{S.trafic.modeOd}</option>
           </select>
         </label>
+        {exitIds.length >= SEUIL_RECHERCHE ? (
+          <ChampRecherche
+            value={rechercheSorties}
+            onChange={setRechercheSorties}
+            label={S.trafic.sorties}
+            testId="recherche-sorties"
+          />
+        ) : null}
         <div className="table-wrap">
           <table className="data-table">
             <thead>
@@ -149,7 +174,7 @@ export function TraficPanel(): JSX.Element {
               </tr>
             </thead>
             <tbody>
-              {exitIds.map((id) => {
+              {sortiesVues.map((id) => {
                 const exit = demand.exits[id]
                 const name = label(demand, network, id, 'exit')
                 return (
@@ -173,6 +198,7 @@ export function TraficPanel(): JSX.Element {
               })}
             </tbody>
           </table>
+          {!sortiesVues.length ? <p className="table-note">{S.recherche.aucune}</p> : null}
         </div>
       </section>
 
@@ -294,6 +320,36 @@ export function TraficPanel(): JSX.Element {
 
       <section className="block">
         <h3>{S.trafic.reglages}</h3>
+        {/* Jour et heure valent pour toute la commune : ce sont eux qui désignent, à chaque instant, le
+            plan de feux actif de chaque carrefour (docs/ARCHITECTURE.md §14.4). */}
+        <div className="row">
+          <label className="field">
+            <span className="field-label">{S.trafic.jourSimule}</span>
+            <select
+              value={settings.dayOfWeek}
+              data-testid="jour-simule"
+              onChange={(e) => store.updateSettings({ dayOfWeek: Number(e.target.value) })}
+            >
+              {[1, 2, 3, 4, 5, 6, 7].map((d) => <option key={d} value={d}>{DAY_LABELS[d]}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">{S.trafic.heureSimulee}</span>
+            <span className="field-input">
+              <input
+                type="time"
+                value={heureInput(settings.startTimeOfDayMin)}
+                data-testid="heure-simulee"
+                onChange={(e) => {
+                  const [h, m] = e.target.value.split(':').map(Number)
+                  // Un champ vidé donne NaN : on ne touche alors pas au réglage.
+                  if (Number.isFinite(h) && Number.isFinite(m)) store.updateSettings({ startTimeOfDayMin: h * 60 + m })
+                }}
+              />
+            </span>
+          </label>
+        </div>
+        <p className="hint">{S.trafic.heureSimuleeAide}</p>
         <div className="row">
           <NumberField label={S.trafic.duree} value={settings.durationMin} min={1} max={480} unit={S.unites.min} onChange={(v) => store.updateSettings({ durationMin: Math.round(v) })} />
           <NumberField label={S.trafic.chauffe} value={settings.warmupMin} min={0} max={120} unit={S.unites.min} onChange={(v) => store.updateSettings({ warmupMin: Math.round(v) })} />

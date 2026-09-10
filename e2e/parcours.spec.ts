@@ -9,6 +9,7 @@
  * débogage ; les tests s'en servent pour cibler un nœud précis, ce qu'un sélecteur CSS ne permet pas sur un canvas.
  */
 import { expect, test, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Debug = {
@@ -174,6 +175,92 @@ test('un carrefour peut passer en feux avec un plan par défaut', async ({ page 
 
   await page.getByTestId('onglet-feux').click()
   await expect(page.getByTestId('mode-feux')).toBeVisible({ timeout: 15_000 })
+
+  // Une armoire commande parfois deux nœuds voisins (carrefour décalé) : on regroupe depuis le panneau.
+  await page.getByTestId('ajouter-noeud').click()
+  const regroupe = await withDebug(page, (d, id: string) => {
+    const net = d.store.getState().project.network
+    const controller = net.controllers[net.controls[id]?.controllerId]
+    return {
+      noeuds: controller?.nodeIds.length ?? 0,
+      tousAFeux: (controller?.nodeIds ?? []).every((n: string) => net.controls[n]?.type === 'signals'),
+    }
+  }, nodeId as string)
+  expect(regroupe).toEqual({ noeuds: 2, tousAFeux: true })
+
+  // Et le regroupement se défait : le nœud ajouté retrouve sa régulation ordinaire.
+  await page.getByTestId('annuler').click()
+  const seul = await withDebug(page, (d, id: string) => {
+    const net = d.store.getState().project.network
+    return net.controllers[net.controls[id]?.controllerId]?.nodeIds.length ?? 0
+  }, nodeId as string)
+  expect(seul).toBe(1)
+})
+
+test('le dossier d’un carrefour se charge sur le feu sélectionné', async ({ page }) => {
+  await page.goto('/')
+  await attendreProjet(page)
+
+  // Le carrefour du dossier VE001 de Veauche : Avenue du Général de Gaulle / Croix des Pères. C'est
+  // l'exploitant qui le désigne — ici en le sélectionnant sur la carte — puis qui le passe en feux.
+  const nodeId = await withDebug(page, (d) => {
+    const state = d.store.getState()
+    const net = state.project.network
+    const rues = new Map<string, Set<string>>()
+    for (const e of Object.values(net.edges) as any[]) {
+      if (!e.name) continue
+      for (const n of [e.from, e.to]) {
+        if (!rues.has(n)) rues.set(n, new Set())
+        rues.get(n).add(e.name)
+      }
+    }
+    for (const [id, noms] of rues) {
+      if (noms.has('Avenue du Général de Gaulle') && noms.has('Rue de la Croix des Pères')) {
+        state.setTab('reseau')
+        state.select({ kind: 'node', id })
+        return id
+      }
+    }
+    return null
+  }, null)
+  expect(nodeId, 'la démonstration doit contenir le carrefour de Gaulle / Croix des Pères').not.toBeNull()
+
+  await page.getByTestId('regulation-noeud').selectOption('signals')
+  await page.getByTestId('onglet-feux').click()
+  await expect(page.getByTestId('mode-feux')).toBeVisible({ timeout: 15_000 })
+
+  const dossier = readFileSync('src/geo/fixtures/veauche-VE001-gaulle-croix-des-peres.json', 'utf8')
+  await page.getByTestId('importer-dossier').click()
+  await page.locator('input[type=file]').last().setInputFiles({
+    name: 'veauche_feux_VE001_gaulle_croix_des_peres.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(dossier),
+  })
+  await expect(page.getByText(/Dossier appliqué : VE001/)).toBeVisible()
+
+  const feu = await withDebug(page, (d, id: string) => {
+    const net = d.store.getState().project.network
+    const controller = net.controllers[net.controls[id]?.controllerId]
+    return controller
+      ? { source: controller.source, groupes: controller.groups?.length ?? 0, plans: controller.plans?.length ?? 0 }
+      : null
+  }, nodeId as string)
+
+  expect(feu).toEqual({ source: 'dossier VE001', groupes: 7, plans: 1 })
+
+  // Le jour et l'heure simulés sont un réglage de la commune, pas du feu : ils se règlent dans l'onglet
+  // Trafic, et c'est le panneau Feux qui en lit l'effet (le plan que le calendrier du carrefour désigne).
+  await page.getByTestId('onglet-trafic').click()
+  await page.getByTestId('jour-simule').selectOption('6')
+  await page.getByTestId('heure-simulee').fill('17:30')
+  await page.getByTestId('onglet-feux').click()
+  await expect(page.getByText(/Plan actif à 17 h 30 \(samedi\)/i)).toBeVisible()
+
+  const horloge = await withDebug(page, (d) => {
+    const s = d.store.getState().project.settings
+    return { startTimeOfDayMin: s.startTimeOfDayMin, dayOfWeek: s.dayOfWeek }
+  }, null)
+  expect(horloge).toEqual({ startTimeOfDayMin: 1050, dayOfWeek: 6 })
 })
 
 test('un nœud se déplace à la souris et le déplacement s’annule', async ({ page }) => {
@@ -299,6 +386,40 @@ test('déposer un nœud sur un autre les fusionne', async ({ page }) => {
   expect(restaure, 'annuler doit restaurer le nœud fusionné').toBe(true)
 })
 
+test('la recherche retrouve une voie dans une longue liste', async ({ page }) => {
+  await page.goto('/')
+  await attendreProjet(page)
+
+  await page.getByTestId('onglet-trafic').click()
+  const champ = page.getByTestId('recherche-entrees')
+  await expect(champ).toBeVisible()
+  const entrees = page.locator('section.block').filter({ has: champ })
+  const lignes = entrees.locator('tbody tr')
+  const total = await lignes.count()
+  expect(total).toBeGreaterThan(10)
+
+  // Une entrée réelle de la commune, saisie sans accent ni majuscule : la recherche doit la retrouver.
+  const nom = await withDebug(page, (d) => {
+    const { demand, network } = d.store.getState().project
+    const noms = Object.keys(demand.entries)
+      .map((id: string) => demand.entries[id].label ?? network.nodes[id]?.label ?? '')
+      .filter((n: string) => n.includes(' '))
+    return noms.sort()[0] as string
+  }, null)
+  await champ.fill(nom.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())
+  await expect(lignes).not.toHaveCount(total)
+  await expect(entrees.locator('tbody')).toContainText(nom)
+
+  // Une saisie sans correspondance vide le tableau et le dit.
+  await champ.fill('zzzzz')
+  await expect(lignes).toHaveCount(0)
+  await expect(entrees).toContainText(/Aucun résultat/i)
+
+  // La croix rend la liste entière.
+  await entrees.getByRole('button', { name: 'Effacer la recherche' }).click()
+  await expect(lignes).toHaveCount(total)
+})
+
 test('la configuration se télécharge en JSON complet', async ({ page }) => {
   await page.goto('/')
   await attendreProjet(page)
@@ -393,4 +514,103 @@ test('la comparaison référence / variante chiffre l’effet d’un changement 
   // La carte des écarts est disponible.
   await page.getByTestId('carte-delta-retard').click()
   expect(await withDebug(page, (d) => d.store.getState().ui.colorMode as string, null)).toBe('deltaDelay')
+})
+
+test('les cinq itinéraires les plus courts se comparent entre deux nœuds cliqués', async ({ page }) => {
+  await page.goto('/')
+  await attendreProjet(page)
+  await page.getByTestId('onglet-reseau').click()
+  await page.getByTestId('outil-itineraires').click()
+
+  // Deux carrefours distants de quelques centaines de mètres, cadrés ensemble à l'écran.
+  const paire = await withDebug(page, (d) => {
+    const net = d.store.getState().project.network
+    const degre = new Map<string, number>()
+    for (const e of Object.values(net.edges) as any[]) degre.set(e.to, (degre.get(e.to) ?? 0) + 1)
+    const candidats = (Object.values(net.nodes) as any[]).filter((n) => !n.boundary && (degre.get(n.id) ?? 0) >= 3)
+    for (const a of candidats) {
+      for (const b of candidats) {
+        const dist = Math.hypot(a.x - b.x, a.y - b.y)
+        if (dist < 500 || dist > 900) continue
+        const A = d.projection!.toLonLat(a.x, a.y)
+        const B = d.projection!.toLonLat(b.x, b.y)
+        d.map.fitBounds([[A.lat, A.lon], [B.lat, B.lon]], { padding: [140, 140], animate: false })
+        return { a: a.id, b: b.id }
+      }
+    }
+    return null
+  }, null)
+  expect(paire, 'deux carrefours éloignés doivent exister dans la commune').not.toBeNull()
+  await page.waitForTimeout(800)
+
+  // Points écran des deux nœuds, en vérifiant qu'aucun autre nœud n'est plus près du clic.
+  const points = await withDebug(page, (d, ids: { a: string; b: string }) => {
+    const nodes = d.store.getState().project.network.nodes
+    const point = (id: string) => {
+      const n = nodes[id]
+      const { lon, lat } = d.projection!.toLonLat(n.x, n.y)
+      const p = d.map.latLngToContainerPoint([lat, lon])
+      let plusProche = id
+      let meilleure = Infinity
+      for (const [autre, m] of Object.entries(nodes) as [string, any][]) {
+        const ll = d.projection!.toLonLat(m.x, m.y)
+        const q = d.map.latLngToContainerPoint([ll.lat, ll.lon])
+        const dist = Math.hypot(q.x - p.x, q.y - p.y)
+        if (dist < meilleure) { meilleure = dist; plusProche = autre }
+      }
+      return { px: p.x, py: p.y, plusProche }
+    }
+    return { a: point(ids.a), b: point(ids.b) }
+  }, paire!)
+  expect(points.a.plusProche).toBe(paire!.a)
+  expect(points.b.plusProche).toBe(paire!.b)
+
+  const boite = await page.locator('.carte-conteneur').boundingBox()
+  expect(boite).not.toBeNull()
+  await page.mouse.click(boite!.x + points.a.px, boite!.y + points.a.py)
+  await page.mouse.click(boite!.x + points.b.px, boite!.y + points.b.py)
+
+  // Le panneau liste cinq itinéraires, du plus rapide au plus lent.
+  await expect(page.getByTestId('itineraire-0')).toBeVisible()
+  await expect(page.getByTestId('itineraire-4')).toBeVisible()
+  const temps = await withDebug(page, (d) => {
+    const a = d.store.getState().ui.itineraires
+    return { chemins: a.chemins.map((c: any) => c.time as number), from: a.from as string, to: a.to as string }
+  }, null)
+  expect(temps.from).toBe(paire!.a)
+  expect(temps.to).toBe(paire!.b)
+  expect(temps.chemins).toHaveLength(5)
+  for (let i = 1; i < temps.chemins.length; i++) expect(temps.chemins[i]).toBeGreaterThanOrEqual(temps.chemins[i - 1])
+
+  // Le temps du premier itinéraire est écrit dans le tableau, et le ruban est dessiné sur la carte.
+  await expect(page.getByTestId('itineraire-0')).toContainText(/\d+\s*(s|min)/)
+  const rubanVisible = await page.evaluate(() => {
+    const c = document.querySelector('canvas.carte-canvas--statique') as HTMLCanvasElement | null
+    const ctx = c?.getContext('2d')
+    if (!c || !ctx) return false
+    const data = ctx.getImageData(0, 0, c.width, c.height).data
+    // Couleur du meilleur itinéraire (#d1495b), tolérance large : le ruban est dessiné en semi-transparence.
+    for (let i = 0; i < data.length; i += 4) {
+      if (Math.abs(data[i] - 209) < 40 && Math.abs(data[i + 1] - 73) < 45 && Math.abs(data[i + 2] - 91) < 45) return true
+    }
+    return false
+  })
+  expect(rubanVisible, 'le ruban du meilleur itinéraire doit être visible sur la carte').toBe(true)
+
+  // Une modification du réseau périme la comparaison plutôt que d'afficher des temps devenus faux.
+  await withDebug(page, (d) => {
+    const s = d.store.getState()
+    const chemin = s.ui.itineraires.chemins[0]
+    s.updateEdge(chemin.edges[0], { closed: true })
+  }, null)
+  await expect(page.getByTestId('itineraires-perimes')).toBeVisible()
+  await page.getByTestId('itineraires-recalculer').click()
+  await expect(page.getByTestId('itineraire-0')).toBeVisible()
+  const apres = await withDebug(page, (d) => {
+    const a = d.store.getState().ui.itineraires
+    return { perime: a.perime as boolean, premier: a.chemins[0].edges as string[] }
+  }, null)
+  expect(apres.perime).toBe(false)
+  // Le tronçon fermé n'est plus emprunté : le recalcul a bien vu le réseau modifié.
+  expect(apres.premier.length).toBeGreaterThan(0)
 })

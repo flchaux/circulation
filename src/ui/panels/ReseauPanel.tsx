@@ -2,7 +2,8 @@
  * Panneau « Réseau » : édition de l'élément sélectionné sur la carte (nœud ou tronçon) et outils à deux clics.
  *
  * Le contenu dépend de la sélection : régulation, approches qui cèdent le passage et matrice des mouvements
- * autorisés pour un nœud ; attributs, sens et fermeture pour un tronçon.
+ * autorisés pour un nœud ; attributs, sens et fermeture pour un tronçon. Sous les outils vient le résultat de
+ * l'outil « itinéraires », seul bloc du panneau qui ne dépende ni de la sélection ni de l'outil actif.
  */
 import { useMemo, useState } from 'react'
 import type { JSX } from 'react'
@@ -12,7 +13,8 @@ import { HIGHWAY_CLASSES } from '@/model/types'
 import { effectiveControl } from '@/model/defaults'
 import { buildAdjacency } from '@/model/geometry'
 import { NumberField } from '@/ui/components/NumberField'
-import { CONTROL_LABELS, HIGHWAY_LABELS, S, formatNumber } from '@/ui/strings'
+import { itineraireColor } from '@/ui/map/colors'
+import { CONTROL_LABELS, HIGHWAY_LABELS, S, formatDureeTrajet, formatNumber } from '@/ui/strings'
 
 const CONTROL_TYPES: ControlType[] = ['priority_class', 'priority_right', 'give_way', 'stop', 'signals', 'roundabout']
 
@@ -50,14 +52,24 @@ export function ReseauPanel(): JSX.Element {
 
       <section className="block">
         <h3>{S.reseau.outils}</h3>
-        {/* Quatre outils : une grille 2×2, les deux outils de création (nœud puis tronçon) côte à côte. */}
+        {/* Cinq outils : une grille 2×2 (les deux outils de création côte à côte), puis « Itinéraires »
+            sur toute la largeur — c'est le seul qui ne modifie rien, il ne se mêle pas aux autres. */}
         <div className="segmented segmented--grille" role="group" aria-label={S.reseau.outils}>
           <button type="button" className={tool === 'select' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('select')}>{S.reseau.outilSelection}</button>
           <button type="button" className={tool === 'addNode' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('addNode')}>{S.reseau.outilNoeud}</button>
           <button type="button" className={tool === 'addEdge' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('addEdge')}>{S.reseau.outilAjout}</button>
           <button type="button" className={tool === 'greenwave' ? 'active' : ''} onClick={() => useAppStore.getState().setTool('greenwave')}>{S.reseau.outilOnde}</button>
+          <button
+            type="button"
+            className={`pleine-largeur${tool === 'itineraires' ? ' active' : ''}`}
+            data-testid="outil-itineraires"
+            onClick={() => useAppStore.getState().setTool('itineraires')}
+          >
+            {S.reseau.outilItineraires}
+          </button>
         </div>
         {tool === 'greenwave' ? <p className="hint">{S.reseau.outilOndeAide}</p> : null}
+        {tool === 'itineraires' ? <p className="hint">{S.reseau.outilItinerairesAide}</p> : null}
         {tool === 'addNode' ? (
           <>
             <p className="hint">{S.reseau.outilNoeudAide}</p>
@@ -107,7 +119,98 @@ export function ReseauPanel(): JSX.Element {
         ) : null}
         {tool !== 'select' && toolNodes.length === 1 ? <p className="hint">{S.reseau.outilPremierNoeud}</p> : null}
       </section>
+
+      <ItinerairesResultat />
     </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Itinéraires les plus courts                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Résultat de l'outil « itinéraires » : les cinq chemins les plus courts, leur temps et leur écart au
+ * meilleur. Le bloc reste affiché quand on revient à l'outil de sélection — la comparaison sert justement
+ * à décider d'une modification, qu'il faut pouvoir faire sans perdre la réponse.
+ */
+function ItinerairesResultat(): JSX.Element | null {
+  const apercu = useAppStore((s) => s.ui.itineraires)
+  const network = useAppStore((s) => s.project?.network)
+  if (!apercu || !network) return null
+  const store = useAppStore.getState()
+  const meilleur = apercu.chemins[0]
+
+  return (
+    <section className="block" data-testid="itineraires">
+      <h3>{S.itineraires.titre}</h3>
+      <p className="hint">
+        {S.itineraires.de}{' '}
+        <button type="button" className="link" onClick={() => store.select({ kind: 'node', id: apercu.from }, { reveal: true })}>
+          {nodeLabel(network, apercu.from)}
+        </button>
+        {' '}{S.itineraires.vers}{' '}
+        <button type="button" className="link" onClick={() => store.select({ kind: 'node', id: apercu.to }, { reveal: true })}>
+          {nodeLabel(network, apercu.to)}
+        </button>
+      </p>
+
+      {apercu.perime ? <p className="hint attention" data-testid="itineraires-perimes">{S.itineraires.perime}</p> : null}
+      {!apercu.chemins.length ? <p className="hint">{S.itineraires.aucun}</p> : null}
+
+      {apercu.chemins.length && !apercu.perime ? (
+        <div className="table-wrap">
+          <table className="data-table itineraires">
+            <thead>
+              <tr>
+                <th>{S.itineraires.rang}</th>
+                <th className="right">{S.itineraires.temps}</th>
+                <th className="right">{S.itineraires.ecart}</th>
+                <th className="right">{S.itineraires.longueur}</th>
+                <th className="right" title={S.itineraires.carrefoursAide}>{S.itineraires.carrefours}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {apercu.chemins.map((chemin, rang) => (
+                <tr
+                  key={chemin.edges.join(',')}
+                  className={apercu.actif === rang ? 'active' : ''}
+                  data-testid={`itineraire-${rang}`}
+                  onMouseEnter={() => store.setItineraireActif(rang)}
+                  onMouseLeave={() => store.setItineraireActif(-1)}
+                >
+                  <th scope="row">
+                    <span className="pastille-itineraire" style={{ background: itineraireColor(rang) }} aria-hidden="true" />
+                    {rang + 1}
+                  </th>
+                  <td className="right">{formatDureeTrajet(chemin.time)}</td>
+                  <td className="right">
+                    {rang === 0
+                      ? <span className="muted">{S.itineraires.identique}</span>
+                      : `+ ${formatDureeTrajet(chemin.time - meilleur.time)}`}
+                  </td>
+                  <td className="right">{formatNumber(chemin.length / 1000, 2)} {S.unites.km}</td>
+                  <td className="right">{Math.max(0, chemin.nodes.length - 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {apercu.chemins.length && !apercu.perime ? <p className="hint">{S.itineraires.survolAide}</p> : null}
+      <p className="hint">{S.itineraires.aide}</p>
+      <div className="row">
+        {apercu.perime ? (
+          <button type="button" className="button" data-testid="itineraires-recalculer" onClick={() => store.recalculerItineraires()}>
+            {S.itineraires.recalculer}
+          </button>
+        ) : null}
+        <button type="button" className="button" data-testid="itineraires-effacer" onClick={() => store.effacerItineraires()}>
+          {S.itineraires.effacer}
+        </button>
+      </div>
+    </section>
   )
 }
 

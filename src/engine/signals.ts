@@ -700,6 +700,30 @@ export class SignalEngine {
    * bel et bien du trafic, en cédant aux piétons (§14.5). L'exclure donnerait une part de vert nulle — donc
    * une saturation infinie — sur une approche dont tous les mouvements franchissent une traversée.
    */
+  /**
+   * Retard moyen qu'un feu impose *a priori* à chaque approche, sans rien savoir du trafic : la formule
+   * uniforme de Webster à degré de saturation nul, `C (1 − u)² / 2`, où `u` est la part de vert.
+   *
+   * Sert au routage (§5.5) : sans ce terme, un itinéraire jalonné de feux paraît aussi rapide qu'un axe
+   * libre tant que personne ne l'a essayé, et le routage l'y envoie en bloc pour l'apprendre à ses dépens.
+   * Un feu clignotant ou éteint ne retarde rien : le nœud suit alors la priorité par classe.
+   */
+  signalDelayByEdge(): Float64Array {
+    const share = this.greenShareByEdge()
+    const out = new Float64Array(this.g.edgeIds.length)
+    for (const c of this.controllers) {
+      if (c.mode !== 'fixed' && c.mode !== 'actuated') continue
+      if (c.cycle <= 0) continue
+      for (let i = 0; i < c.allMovs.length; i++) {
+        const e = this.g.movementFrom[c.allMovs[i]]
+        if (e < 0) continue
+        const u = Math.min(1, Math.max(0, share[e]))
+        out[e] = (c.cycle * (1 - u) ** 2) / 2
+      }
+    }
+    return out
+  }
+
   greenShareByEdge(): Float64Array {
     const share = new Float64Array(this.g.edgeIds.length).fill(1)
     for (const c of this.controllers) {

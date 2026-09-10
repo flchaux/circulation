@@ -6,10 +6,10 @@
  * un mouvement est une courbe de Bézier de l'une vers l'autre, dont un clic fait tourner l'état
  * rouge → protégé → permis.
  *
- * S'y ajoute ce qu'un dossier de carrefour réel apporte (docs/ARCHITECTURE.md §14) : import d'un fichier de
- * dossiers, origine des réglages, groupes de signaux, choix du plan de feux et matrice d'inter-verts. Ces
- * blocs n'apparaissent que lorsque le contrôleur porte les données correspondantes : un plan créé dans
- * l'éditeur s'affiche exactement comme avant.
+ * S'y ajoute ce qu'un dossier de carrefour réel apporte (docs/ARCHITECTURE.md §14) : import du dossier du
+ * carrefour sélectionné, origine des réglages, groupes de signaux, choix du plan de feux et matrice
+ * d'inter-verts. Ces blocs n'apparaissent que lorsque le contrôleur porte les données correspondantes :
+ * un plan créé dans l'éditeur s'affiche exactement comme avant.
  */
 import { useId, useMemo, useRef, useState } from 'react'
 import type { JSX, KeyboardEvent } from 'react'
@@ -17,13 +17,14 @@ import { useAppStore } from '@/state/store'
 import type {
   ControllerId, GreenKind, MovementKey, Network, NodeId, SignalController, SignalGroup, SignalPhase, SignalPlan,
 } from '@/model/types'
-import type { DossierNonRattache } from '@/state/storeTypes'
 import type { Movement } from '@/model/geometry'
 import {
   activePlan, clockAt, controllerCycle, controllerMovements, describeMovement, phaseDuration, phaseMovements,
   phasePedestrianYields, phaseTransition, planPhaseTiming, validateController,
 } from '@/model/signals'
+import { ChampRecherche } from '@/ui/components/ChampRecherche'
 import { NumberField } from '@/ui/components/NumberField'
+import { SEUIL_RECHERCHE, filtrer } from '@/ui/components/recherche'
 import { DAY_LABELS, GREEN_KIND_LABELS, S, SIGNAL_MODE_LABELS, formatNumber, formatTimeOfDay } from '@/ui/strings'
 
 const SIGNAL_MODES: SignalController['mode'][] = ['fixed', 'actuated', 'flashing', 'off']
@@ -62,6 +63,16 @@ export function FeuxPanel(): JSX.Element {
     [network],
   )
 
+  // La recherche porte aussi sur les rues qui se croisent au carrefour : l'exploitant connaît « son »
+  // carrefour par ses voies, rarement par le nom du contrôleur.
+  const [recherche, setRecherche] = useState('')
+  const controllersVus = useMemo(
+    () => (network
+      ? filtrer(controllers, recherche, (c) => [c.name, ...c.nodeIds.map((id) => nomDeNoeud(network, id))])
+      : controllers),
+    [controllers, network, recherche],
+  )
+
   if (!network) return <div className="panel"><p className="hint">{S.app.aucunProjet}</p></div>
 
   const activeId = selection?.kind === 'controller'
@@ -73,9 +84,13 @@ export function FeuxPanel(): JSX.Element {
     <div className="panel">
       <section className="block">
         <h2>{S.feux.titre}</h2>
+        {controllers.length >= SEUIL_RECHERCHE ? (
+          <ChampRecherche value={recherche} onChange={setRecherche} label={S.feux.liste} testId="recherche-feux" />
+        ) : null}
+        {!controllersVus.length && controllers.length ? <p className="hint">{S.recherche.aucune}</p> : null}
         {controllers.length ? (
           <ul className="list">
-            {controllers.map((c) => (
+            {controllersVus.map((c) => (
               <li key={c.id}>
                 <button
                   type="button"
@@ -96,7 +111,6 @@ export function FeuxPanel(): JSX.Element {
           <p className="hint">{S.feux.aucun}</p>
         )}
       </section>
-      <DossiersImport />
       {active ? (
         <ControllerEditor
           network={network}
@@ -111,23 +125,128 @@ export function FeuxPanel(): JSX.Element {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Import d'un fichier de dossiers de carrefour                       */
+/*  Carrefour regroupé : les nœuds pilotés par le contrôleur           */
 /* ------------------------------------------------------------------ */
 
-function DossiersImport(): JSX.Element {
-  const fileRef = useRef<HTMLInputElement>(null)
-  // Le bilan vient du store et non d'un état local : changer d'onglet démonte ce panneau, et l'exploitant
-  // doit pouvoir revenir lire les réserves de l'import après avoir regardé ses carrefours sur la carte.
-  const rapport = useAppStore((s) => s.dossiersRapport)
-  const nonRattaches = useAppStore((s) => s.dossiersNonRattaches)
+/** Nom d'un nœud pour l'exploitant : son étiquette, sinon les rues qui s'y croisent. */
+function nomDeNoeud(network: Network, nodeId: NodeId): string {
+  const node = network.nodes[nodeId]
+  if (node?.label) return node.label
+  const rues = new Set<string>()
+  for (const e of Object.values(network.edges)) {
+    if ((e.from === nodeId || e.to === nodeId) && e.name) rues.add(e.name)
+  }
+  return [...rues].slice(0, 3).join(' / ') || nodeId
+}
+
+/**
+ * Nœuds du réseau que ce contrôleur peut absorber : ses voisins directs, hors bord de commune.
+ *
+ * Une armoire réelle commande un carrefour d'un seul tenant ; regrouper deux nœuds qui ne se touchent
+ * pas donnerait un « carrefour » dont les mouvements ne s'enchaînent pas. Un voisin déjà à feux reste
+ * proposé — c'est le cas de deux carrefours voisins repris par une même armoire — mais il est annoncé
+ * comme tel, car son propre contrôleur y perdra ce nœud.
+ */
+function voisinsRegroupables(network: Network, controller: SignalController): NodeId[] {
+  const dedans = new Set(controller.nodeIds)
+  const out = new Set<NodeId>()
+  for (const e of Object.values(network.edges)) {
+    if (dedans.has(e.from) && !dedans.has(e.to) && !network.nodes[e.to]?.boundary) out.add(e.to)
+    if (dedans.has(e.to) && !dedans.has(e.from) && !network.nodes[e.from]?.boundary) out.add(e.from)
+  }
+  return [...out].sort((a, b) => nomDeNoeud(network, a).localeCompare(nomDeNoeud(network, b), 'fr'))
+}
+
+function CarrefourRegroupe({ network, controller }: { network: Network; controller: SignalController }): JSX.Element {
+  const voisins = useMemo(() => voisinsRegroupables(network, controller), [network, controller])
+  const [choix, setChoix] = useState<NodeId>('')
+  const cible = voisins.includes(choix) ? choix : voisins[0] ?? ''
+  const store = useAppStore.getState()
 
   return (
-    <section className="block">
-      <h3>{S.feux.dossiers}</h3>
-      <p className="hint">{S.feux.dossiersAide}</p>
+    <>
+      <h4>{S.feux.regroupement} · {formatNumber(controller.nodeIds.length)} {S.feux.noeuds}</h4>
+      <p className="hint">{S.feux.regroupementAide}</p>
+      <p className="field-label">{S.feux.regroupementNoeuds}</p>
+      <ul className="list">
+        {controller.nodeIds.map((nodeId) => (
+          <li key={nodeId} className="list-item">
+            <button
+              type="button"
+              className="list-row"
+              onClick={() => store.select({ kind: 'node', id: nodeId }, { reveal: true })}
+              onMouseEnter={() => store.setHover({ kind: 'node', id: nodeId })}
+              onMouseLeave={() => store.setHover(null)}
+            >
+              <span className="list-main">{nomDeNoeud(network, nodeId)}</span>
+              <span className="list-side">{S.feux.selectionner}</span>
+            </button>
+            <button
+              type="button"
+              className="button"
+              data-testid={`retirer-noeud-${nodeId}`}
+              disabled={controller.nodeIds.length < 2}
+              title={controller.nodeIds.length < 2 ? S.feux.regroupementRetirerAide : undefined}
+              onClick={() => store.setControllerNodes(controller.id, controller.nodeIds.filter((n) => n !== nodeId))}
+            >
+              {S.feux.regroupementRetirer}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {voisins.length ? (
+        <div className="row">
+          <label className="field">
+            <span className="field-label">{S.feux.regroupementVoisins}</span>
+            <select value={cible} data-testid="voisin-a-regrouper" onChange={(e) => setChoix(e.target.value)}>
+              {voisins.map((nodeId) => (
+                <option key={nodeId} value={nodeId}>
+                  {nomDeNoeud(network, nodeId)}
+                  {network.controls[nodeId]?.type === 'signals' ? ` (${S.feux.regroupementDejaFeux})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="button"
+            data-testid="ajouter-noeud"
+            onClick={() => { if (cible) store.setControllerNodes(controller.id, [...controller.nodeIds, cible]) }}
+          >
+            {S.feux.regroupementAjouter}
+          </button>
+        </div>
+      ) : (
+        <p className="hint">{S.feux.regroupementAucunVoisin}</p>
+      )}
+    </>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Import du dossier du carrefour sélectionné                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Charge sur CE carrefour le fichier de son dossier. C'est l'exploitant qui désigne le carrefour, en le
+ * sélectionnant sur la carte : l'application ne cherche plus à reconnaître aux noms de rues quel carrefour
+ * un dossier décrit, faute de pouvoir trancher sans lui dans la majorité des cas (§14.3).
+ */
+function DossierImport({ controller }: { controller: SignalController }): JSX.Element {
+  const fileRef = useRef<HTMLInputElement>(null)
+  // Le bilan vient du store et non d'un état local : changer d'onglet démonte ce panneau, et l'exploitant
+  // doit pouvoir revenir lire les réserves de l'import après avoir regardé son carrefour sur la carte.
+  const rapport = useAppStore((s) => s.dossierRapport)
+  // Le bilan d'un autre carrefour ne le concerne pas : il resterait affiché sous un plan qu'il ne décrit pas.
+  const bilan = rapport?.controllerId === controller.id ? rapport : null
+
+  return (
+    <>
+      <h4>{S.feux.dossier}</h4>
+      <p className="hint">{S.feux.dossierAide}</p>
       <div className="row">
-        <button type="button" className="button" onClick={() => fileRef.current?.click()}>
-          {S.feux.dossiersImporter}
+        <button type="button" className="button" data-testid="importer-dossier" onClick={() => fileRef.current?.click()}>
+          {S.feux.dossierImporter}
         </button>
       </div>
       <input
@@ -136,132 +255,32 @@ function DossiersImport(): JSX.Element {
         accept=".json,application/json"
         hidden
         onChange={(e) => {
-          const file = e.target.files?.[0]
+          const fichier = e.target.files?.[0]
           // Le champ est vidé tout de suite pour qu'un second import du même fichier déclenche bien `change`.
           e.target.value = ''
-          if (!file) return
-          void file.text().then((text) => useAppStore.getState().importDossiersFeux(text))
+          if (!fichier) return
+          void fichier.text().then((texte) => useAppStore.getState().importDossierFeux(controller.id, texte))
         }}
       />
-      {rapport ? (
+      {bilan ? (
         <div className="report">
-          <strong>{S.feux.dossiersBilan}</strong>
+          <strong>{S.feux.dossierBilan}</strong>
           <ul>
-            <li>{formatNumber(rapport.matches)} {S.feux.dossiersRattaches}</li>
-            {rapport.nonRattaches ? <li>{formatNumber(rapport.nonRattaches)} {S.feux.dossiersNonRattaches}</li> : null}
-            {!rapport.matches ? <li>{S.feux.dossiersAucun}</li> : null}
+            {bilan.applique
+              ? <li>{S.feux.dossierApplique} {bilan.dossierId} · {formatNumber(bilan.groupes)} {S.feux.dossierGroupes}</li>
+              : <li>{S.feux.dossierEchec}</li>}
           </ul>
+          {bilan.avertissements.length ? (
+            <>
+              <p className="hint">{S.feux.dossierReserves}</p>
+              <ul className="warnings">
+                {bilan.avertissements.map((a, i) => <li key={i}>{a}</li>)}
+              </ul>
+            </>
+          ) : null}
         </div>
       ) : null}
-      {/* Les dossiers à rattacher passent avant les réserves : sur un fichier réel celles-ci font
-          plusieurs dizaines de lignes, et repousseraient hors de l'écran la seule chose à faire. */}
-      {nonRattaches.length ? (
-        <>
-          <h4>{S.feux.dossiersARattacher} · {formatNumber(nonRattaches.length)}</h4>
-          <p className="hint">{S.feux.dossiersARattacherAide} {S.feux.dossierCandidatsAide}</p>
-          {nonRattaches.map((d) => <DossierARattacher key={d.dossierId} dossier={d} />)}
-        </>
-      ) : null}
-      {rapport?.avertissements.length ? (
-        <div className="report">
-          <p className="hint">{S.feux.dossiersReserves}</p>
-          <ul className="warnings">
-            {rapport.avertissements.map((a, i) => <li key={i}>{a}</li>)}
-          </ul>
-        </div>
-      ) : null}
-    </section>
-  )
-}
-
-/** Valeur de choix désignant le carrefour sélectionné sur la carte, quand aucun candidat ne convient. */
-const CHOIX_CARTE = 'carte'
-
-/**
- * Un dossier qu'aucun carrefour ne revendique seul : ses voies, ce qui bloque, et le choix du carrefour
- * auquel l'appliquer. Les candidats sont désignés par leurs rues ; leur identifiant OpenStreetMap
- * n'apparaît nulle part, il ne figure sur aucun dossier de carrefour.
- */
-function DossierARattacher({ dossier }: { dossier: DossierNonRattache }): JSX.Element {
-  const [choix, setChoix] = useState<string>(dossier.candidats[0]?.nodeId ?? CHOIX_CARTE)
-  // Repli sur la carte quand le dossier ne propose rien, ou quand le candidat retenu a disparu du réseau.
-  const surCarte = choix === CHOIX_CARTE || !dossier.candidats.some((c) => c.nodeId === choix)
-  const noeudCarte = useAppStore((s) => (s.selection?.kind === 'node' ? s.selection.id : null))
-  const nomNoeudCarte = useAppStore((s) => (
-    s.selection?.kind === 'node' ? s.project?.network.nodes[s.selection.id]?.label ?? '' : ''
-  ))
-  const cible = surCarte ? noeudCarte : choix
-
-  /** Montrer un carrefour : la carte s'y recentre, ce qu'un survol seul ne fait pas. */
-  const montrer = (nodeId: NodeId): void => {
-    useAppStore.getState().select({ kind: 'node', id: nodeId }, { reveal: true })
-  }
-
-  return (
-    <div className="dossier-attente">
-      <p className="dossier-nom">{dossier.nom} <span className="muted">({dossier.dossierId})</span></p>
-      {dossier.voies.length ? (
-        <p className="hint">{S.feux.dossierVoies} : {dossier.voies.join(', ')}</p>
-      ) : null}
-      <p className="hint">{S.feux.dossierPourquoi} : {dossier.raison}</p>
-      <p className="field-label">{S.feux.dossierCandidats}</p>
-      {dossier.candidats.length ? (
-        <ul className="list">
-          {dossier.candidats.map((c) => (
-            <li key={c.nodeId} className="list-item">
-              <button
-                type="button"
-                className={`list-row${!surCarte && choix === c.nodeId ? ' active' : ''}`}
-                aria-pressed={!surCarte && choix === c.nodeId}
-                onClick={() => { setChoix(c.nodeId); montrer(c.nodeId) }}
-                onFocus={() => montrer(c.nodeId)}
-                onMouseEnter={() => useAppStore.getState().setHover({ kind: 'node', id: c.nodeId })}
-                onMouseLeave={() => useAppStore.getState().setHover(null)}
-              >
-                <span className="list-main">
-                  {c.etiquette}
-                  {c.ruesRetrouvees.length > 0 && (
-                    <span className="candidat-rues">
-                      {S.feux.dossierRuesRetrouvees} {c.ruesRetrouvees.join(', ')}
-                    </span>
-                  )}
-                </span>
-                <span className="list-side">{S.feux.dossierVoir}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="hint">{S.feux.dossierAucunCandidat}</p>
-      )}
-      {/* Dernier recours : le carrefour que le dossier décrit peut n'être proposé par aucun candidat,
-          par exemple quand le fond de carte ne nomme pas ses rues comme le dossier. */}
-      <ul className="list">
-        <li className="list-item">
-          <button
-            type="button"
-            className={`list-row${surCarte ? ' active' : ''}`}
-            aria-pressed={surCarte}
-            disabled={!noeudCarte}
-            onClick={() => setChoix(CHOIX_CARTE)}
-          >
-            {/* Le nom du carrefour passe en tête : c'est lui que l'exploitant relit avant de valider. */}
-            <span className="list-main">{noeudCarte ? nomNoeudCarte || S.feux.dossierSurCarte : S.feux.dossierSurCarteAucun}</span>
-            <span className="list-side">{noeudCarte ? S.feux.dossierSurCarte : ''}</span>
-          </button>
-        </li>
-      </ul>
-      <div className="row">
-        <button
-          type="button"
-          className="button primary"
-          disabled={!cible}
-          onClick={() => { if (cible) useAppStore.getState().rattacherDossier(dossier.dossierId, cible) }}
-        >
-          {S.feux.dossierRattacher}
-        </button>
-      </div>
-    </div>
+    </>
   )
 }
 
@@ -322,6 +341,9 @@ function ControllerEditor(props: {
         </label>
       ) : null}
 
+      <CarrefourRegroupe network={network} controller={controller} />
+      <DossierImport controller={controller} />
+
       <PlanSelector controller={controller} horloge={horloge} planImpose={planImpose} />
       <GroupList controller={controller} />
       <InterGreenTable controller={controller} />
@@ -373,12 +395,6 @@ function ControllerEditor(props: {
 /*  Plans horaires, groupes et inter-verts (dossiers de carrefour)     */
 /* ------------------------------------------------------------------ */
 
-/** Valeur d'un `<input type="time">` (« 08:30 ») à partir de minutes depuis minuit. */
-function heureInput(minOfDay: number): string {
-  const total = Math.max(0, Math.min(1439, Math.round(minOfDay)))
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
-}
-
 /** Période d'un plan : celle du dossier si elle y figure, sinon les plages du calendrier qui le désignent. */
 function periodeDuPlan(controller: SignalController, plan: SignalPlan): string {
   if (plan.period) return plan.period
@@ -393,8 +409,9 @@ function periodeDuPlan(controller: SignalController, plan: SignalPlan): string {
 }
 
 /**
- * Choix du plan de feux. L'heure de départ et le jour simulés sont réglés ici parce que c'est le seul endroit
- * où ils changent quelque chose : ce sont eux qui désignent le plan actif de chaque carrefour (§14.4).
+ * Choix du plan de feux. L'heure et le jour simulés se règlent dans l'onglet Trafic, avec les autres
+ * réglages de simulation : ils valent pour toute la commune (§14.4). Ils sont rappelés ici, en lecture
+ * seule, parce que c'est ici qu'on lit leur effet — le plan que le calendrier du carrefour désigne.
  */
 function PlanSelector(props: {
   controller: SignalController
@@ -402,8 +419,6 @@ function PlanSelector(props: {
   planImpose: string | null
 }): JSX.Element | null {
   const { controller, horloge, planImpose } = props
-  const startTimeOfDayMin = useAppStore((s) => s.project?.settings.startTimeOfDayMin ?? 0)
-  const dayOfWeek = useAppStore((s) => s.project?.settings.dayOfWeek ?? 1)
   const plans = controller.plans
   if (!plans?.length) return null
   const store = useAppStore.getState()
@@ -414,29 +429,6 @@ function PlanSelector(props: {
   return (
     <>
       <h4>{S.feux.plans}</h4>
-      <div className="row">
-        <label className="field">
-          <span className="field-label">{S.feux.heureSimulee}</span>
-          <span className="field-input">
-            <input
-              type="time"
-              value={heureInput(startTimeOfDayMin)}
-              onChange={(e) => {
-                const [h, m] = e.target.value.split(':').map(Number)
-                // Un champ vidé donne NaN : on ne touche alors pas au réglage.
-                if (Number.isFinite(h) && Number.isFinite(m)) store.updateSettings({ startTimeOfDayMin: h * 60 + m })
-              }}
-            />
-          </span>
-        </label>
-        <label className="field">
-          <span className="field-label">{S.feux.jourSimule}</span>
-          <select value={dayOfWeek} onChange={(e) => store.updateSettings({ dayOfWeek: Number(e.target.value) })}>
-            {[1, 2, 3, 4, 5, 6, 7].map((d) => <option key={d} value={d}>{DAY_LABELS[d]}</option>)}
-          </select>
-        </label>
-      </div>
-      <p className="hint">{S.feux.heureSimuleeAide}</p>
       {plans.length > 1 ? (
         <label className="field">
           <span className="field-label">{S.feux.planSelection}</span>
@@ -459,6 +451,7 @@ function PlanSelector(props: {
         {calendrier ? `${calendrier.name} · ${periodeDuPlan(controller, calendrier)}` : '—'}
       </p>
       <p className="hint">{planImpose ? S.feux.planImpose : S.feux.planCalendrierAide}</p>
+      <p className="hint">{S.feux.heureSimuleeRappel}</p>
     </>
   )
 }

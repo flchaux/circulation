@@ -14,7 +14,10 @@ import { VEHICLE_STRIDE } from './protocol'
 import type { Arrival } from './demand'
 import { generateArrivals } from './demand'
 import type { EngineGraph, RouteResult } from './routing'
-import { Router, TRAVEL_EMA_TAU, buildGraph, decayTowardFree, queueDelay } from './routing'
+import {
+  ROUTE_PERTURBATION, ROUTE_VARIANTS, ROUTING_COST_SMOOTHING, Router, TRAVEL_EMA_TAU, applyVariant,
+  buildGraph, decayTowardFree, queueDelay, smoothCosts, structuralDelays, variantFactors,
+} from './routing'
 import { SIG_AMBER, SIG_FREE, SIG_GREEN_PERMITTED, SIG_GREEN_PROTECTED, SIG_RED, SignalEngine } from './signals'
 import type { SignalClock, SignalProbe } from './signals'
 import type { PriorityTables } from './priority'
@@ -70,7 +73,6 @@ export class Simulation {
   private readonly endT: number
 
   private graph: EngineGraph
-  private router: Router
   private signals: SignalEngine
   private prio: PriorityTables
   private stats: StatsCollector
@@ -122,6 +124,28 @@ export class Simulation {
   private inActive!: Uint8Array
   private dischargeList!: Int32Array
   private shuffleRng: () => number = () => 0
+  /**
+   * Un routeur par variante de coûts (§5.5). Une seule en routage statique : sans recalcul, il n'y a ni
+   * bascule à amortir ni flux à partager, et le plus court chemin doit rester le plus court chemin.
+   */
+  private routers: Router[] = []
+  /** Facteurs de perturbation de chaque variante, tirés une fois pour l'exécution. */
+  private variantFactorTables: Float64Array[] = []
+  /** Tampons de coûts par variante, réutilisés d'un recalcul à l'autre. */
+  private variantCosts: Float64Array[] = []
+  /** Table de coûts du recalcul précédent, amortie (`null` avant le premier). */
+  private routingPrev: Float64Array | null = null
+  /** Part de l'observation dans un recalcul (α de l'amortissement). */
+  private smoothing = ROUTING_COST_SMOOTHING
+  /**
+   * Temps de référence d'un tronçon : temps à vide + retard structurel du carrefour qu'il aborde.
+   * Plancher des coûts de routage et cible de la décroissance des mesures (§5.5).
+   */
+  private baseTime!: Float64Array
+  /** Le routage tient compte du retard structurel des carrefours. */
+  private coutStructurel = true
+  /** Graine du tirage de variante, dérivée de celle de la demande. */
+  private readonly variantSeed: number
   private readonly probe: SignalProbe
   /** Heure simulée et réglages du moteur de feux (graine des appels piétons comprise). */
   private readonly signalClock: SignalClock
@@ -137,9 +161,9 @@ export class Simulation {
     this.warmupS = Math.max(0, init.settings.warmupMin * 60)
     this.endT = this.warmupS + Math.max(0, init.settings.durationMin * 60)
 
+    this.variantSeed = streamSeed(this.demand.seed, 'route-variant')
     this.graph = buildGraph(this.net)
     this.edgeIndex = this.graph.edgeIds
-    this.router = new Router(this.graph)
     this.signalClock = {
       startTimeOfDayMin: this.settings.startTimeOfDayMin,
       dayOfWeek: this.settings.dayOfWeek,
@@ -151,6 +175,8 @@ export class Simulation {
     }
     this.signals = new SignalEngine(this.graph, this.net, this.signalClock)
     this.prio = buildPriorityTables(this.graph, this.net, this.settings, this.signals.signalizedNodes)
+    // Les routeurs partent du temps de référence : il faut donc connaître les feux et les priorités.
+    this.buildRouters()
     this.stats = new StatsCollector(this.graph, this.net, this.settings, this.signals.greenShareByEdge())
     this.planEpoch = this.signals.planEpoch
     this.probe = {
@@ -237,12 +263,86 @@ export class Simulation {
     this.lastRoutingUpdate = 0
     this.shuffleRng = createRng(streamSeed(this.demand.seed, 'discharge-order'))
     this.signals.reset()
-    this.router = new Router(this.graph)
+    this.buildRouters()
     this.stats = new StatsCollector(this.graph, this.net, this.settings, this.signals.greenShareByEdge())
     this.planEpoch = this.signals.planEpoch
     this.arrivals = generateArrivals(this.net, this.demand, this.settings)
     if (this.arrivals.length === 0) this.pushWarningOnce('Aucun véhicule à injecter : vérifiez les débits d’entrée.')
     this.prepare(0)
+  }
+
+  /**
+   * Prépare un routeur par variante de coûts et tire leurs facteurs de perturbation (§5.5).
+   *
+   * Les trois réglages sont des constantes du modèle, pas des réglages de projet : ils décrivent le
+   * comportement des conducteurs, pas le scénario étudié. Ils restent surchargeables par `SimSettings`
+   * pour les mesures et les tests, comme la part d'appels piétons.
+   */
+  private buildRouters(): void {
+    const extra = this.settings as SimSettings & {
+      routingSmoothing?: number
+      routeVariants?: number
+      routePerturbation?: number
+      routeControlDelay?: boolean
+    }
+    this.smoothing = extra.routingSmoothing ?? ROUTING_COST_SMOOTHING
+    this.coutStructurel = extra.routeControlDelay ?? true
+    const amplitude = extra.routePerturbation ?? ROUTE_PERTURBATION
+    // Sans recalcul, il n'y a ni bascule à amortir ni flux à partager : un seul routeur, coûts intacts.
+    const variantes = this.settings.dynamicRouting
+      ? Math.max(1, Math.round(extra.routeVariants ?? ROUTE_VARIANTS))
+      : 1
+    const n = this.graph.edgeIds.length
+    this.routers = []
+    this.variantFactorTables = []
+    this.variantCosts = []
+    this.routingPrev = null
+    this.refreshBaseTime()
+    for (let v = 0; v < variantes; v++) {
+      this.routers.push(new Router(this.graph))
+      this.variantFactorTables.push(variantes > 1
+        ? variantFactors(n, this.demand.seed, v, amplitude)
+        : new Float64Array(n).fill(1))
+      this.variantCosts.push(new Float64Array(n))
+    }
+    // Toutes les variantes partent du temps de référence : le premier recalcul n'a lieu qu'au bout d'un
+    // intervalle, et d'ici là chacun doit déjà voir les carrefours qu'il aura à traverser.
+    this.applyRoutingCosts(this.baseTime)
+  }
+
+  /** Variante de coûts d'un véhicule : fonction pure de la graine et de son rang d'arrivée. */
+  private variantOf(id: number): number {
+    const k = this.routers.length
+    if (k <= 1) return 0
+    const h = Math.imul(id ^ this.variantSeed, 2654435761) >>> 0
+    return h % k
+  }
+
+  /**
+   * Temps de référence de chaque tronçon : temps à vide augmenté du retard structurel du carrefour qu'il
+   * aborde. Recalculé à chaque recalcul de coûts, la part de vert changeant avec le plan horaire actif.
+   */
+  private refreshBaseTime(): void {
+    const g = this.graph
+    if (!this.coutStructurel) { this.baseTime = g.freeTime; return }
+    const retards = structuralDelays(
+      g, this.signals.signalDelayByEdge(), this.prio.yielding, this.prio.stopRequired,
+      this.settings.stopDelay, this.settings.startupLostTime,
+    )
+    const base = new Float64Array(g.edgeIds.length)
+    for (let e = 0; e < base.length; e++) base[e] = g.freeTime[e] + retards[e]
+    this.baseTime = base
+  }
+
+  /** Amortit la table observée, puis en donne à chaque variante sa version perturbée. */
+  private applyRoutingCosts(observed: Float64Array): void {
+    const lisse = smoothCosts(this.routingPrev, observed, this.smoothing)
+    this.routingPrev = lisse
+    const k = this.routers.length
+    for (let v = 0; v < k; v++) {
+      const cost = k > 1 ? applyVariant(lisse, this.variantFactorTables[v], this.variantCosts[v]) : lisse
+      this.routers[v].setCosts(cost)
+    }
   }
 
   private pushWarningOnce(message: string): void {
@@ -259,7 +359,7 @@ export class Simulation {
     const t = this.t
     this.prepare(t)
     if (this.settings.dynamicRouting && t - this.lastRoutingUpdate >= this.settings.routingIntervalMin * 60) {
-      this.router.setCosts(this.routingCosts(t))
+      this.applyRoutingCosts(this.routingCosts(t))
       this.lastRoutingUpdate = t
     }
     this.injectArrivals(t)
@@ -337,12 +437,13 @@ export class Simulation {
     for (let i = 0; i < this.pending.length; i++) {
       const p = this.pending[i]
       if (!p.resolved) {
-        p.route = this.computeRoute(p.arrival)
+        const variante = this.variantOf(p.id)
+        p.route = this.computeRoute(p.arrival, variante)
         // Destination inatteignable depuis cette entrée (sens uniques, coupure) : on redirige le véhicule
         // vers une sortie réellement accessible plutôt que de le perdre, ce qui fausserait les débits.
         if (!p.route && !p.reassigned && p.arrival.entryId !== null) {
           p.reassigned = true
-          p.route = this.reassignDestination(p.arrival)
+          p.route = this.reassignDestination(p.arrival, variante)
           if (p.route) this.reassignedCount++
         }
         p.resolved = true
@@ -389,7 +490,7 @@ export class Simulation {
       const config = this.demand.exits[exitId]
       if (!config.enabled || config.weight <= 0) continue
       if (exitId === entryId) continue
-      if (!this.router.routeFromNodeToExit(node, exitId)) continue
+      if (!this.routers[0].routeFromNodeToExit(node, exitId)) continue
       ids.push(exitId)
       poids.push(config.weight)
     }
@@ -408,7 +509,7 @@ export class Simulation {
    * Redirige une arrivée dont la destination est inatteignable vers une sortie accessible, tirée au prorata
    * des poids de sortie. Renvoie `null` si l'entrée ne dessert aucune sortie (elle est alors signalée).
    */
-  private reassignDestination(a: Arrival): RouteResult | null {
+  private reassignDestination(a: Arrival, variante: number): RouteResult | null {
     const entryId = a.entryId
     if (entryId === null) return null
     const node = this.graph.nodeOf.get(entryId)
@@ -436,28 +537,29 @@ export class Simulation {
     }
     a.exitId = reachable.ids[lo]
     a.destEdgeId = null
-    return this.router.routeFromNodeToExit(node, a.exitId)
+    return this.routers[variante].routeFromNodeToExit(node, a.exitId)
   }
 
-  private computeRoute(a: Arrival): RouteResult | null {
+  private computeRoute(a: Arrival, variante: number): RouteResult | null {
     const g = this.graph
+    const router = this.routers[variante]
     if (a.entryId !== null) {
       const node = g.nodeOf.get(a.entryId)
       if (node === undefined) return null
       if (a.destEdgeId !== null) {
         const d = g.edgeOf.get(a.destEdgeId)
-        return d === undefined || g.closed[d] ? null : this.router.routeFromNodeToEdge(node, d)
+        return d === undefined || g.closed[d] ? null : router.routeFromNodeToEdge(node, d)
       }
-      return a.exitId === null ? null : this.router.routeFromNodeToExit(node, a.exitId)
+      return a.exitId === null ? null : router.routeFromNodeToExit(node, a.exitId)
     }
     if (a.originEdgeId === null) return null
     const s = g.edgeOf.get(a.originEdgeId)
     if (s === undefined || g.closed[s]) return null
     if (a.destEdgeId !== null) {
       const d = g.edgeOf.get(a.destEdgeId)
-      return d === undefined || g.closed[d] ? null : this.router.routeToEdge(s, d)
+      return d === undefined || g.closed[d] ? null : router.routeToEdge(s, d)
     }
-    return a.exitId === null ? null : this.router.routeToExit(s, a.exitId)
+    return a.exitId === null ? null : router.routeToExit(s, a.exitId)
   }
 
   private injectVehicle(p: Pending, t: number): void {
@@ -657,8 +759,10 @@ export class Simulation {
     const n = g.edgeIds.length
     const cost = new Float64Array(n)
     const laneFlow = this.settings.saturationFlow / 3600
+    // Le plan horaire a pu changer depuis le dernier recalcul : la part de vert avec lui.
+    this.refreshBaseTime()
     for (let e = 0; e < n; e++) {
-      const free = g.freeTime[e]
+      const free = this.baseTime[e]
       const ema = decayTowardFree(this.travelEma[e], free, t - this.travelEmaTime[e])
       this.travelEma[e] = ema
       this.travelEmaTime[e] = t

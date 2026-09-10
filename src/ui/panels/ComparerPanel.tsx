@@ -298,6 +298,7 @@ export function ComparerPanel(): JSX.Element {
             <DataTable
               columns={edgeColumns}
               rows={edgeRows}
+              searchLabel={S.comparer.troncons}
               rowKey={(r) => r.id}
               maxRows={MAX_ROWS}
               initialSort={{ key: 'retard', dir: 'desc' }}
@@ -312,6 +313,7 @@ export function ComparerPanel(): JSX.Element {
             <DataTable
               columns={exitColumns}
               rows={exitRows}
+              searchLabel={S.comparer.sorties}
               rowKey={(r) => r.id}
               maxRows={MAX_ROWS}
               initialSort={{ key: 'vehicules', dir: 'desc' }}

@@ -2,7 +2,7 @@
  * Carte interactive : fond Leaflet (tuiles OpenStreetMap) surmonté de deux canvas.
  *
  * Répartition des rôles (voir §7 de docs/ARCHITECTURE.md) :
- *  - canvas *statique* : tronçons, nœuds, étiquettes, surbrillance de la sélection, glisser en cours.
+ *  - canvas *statique* : tronçons, nœuds, étiquettes, itinéraires comparés, surbrillance de la sélection, glisser en cours.
  *    Redessiné uniquement quand la scène change d'identité (réseau, mode de couleur, sélection, résultats, glisser)
  *    ou quand le cadrage change (`moveend`, `zoomend`, redimensionnement).
  *  - canvas *dynamique* : véhicules, points d'état des feux, survol, chemin de l'outil en cours.
@@ -41,7 +41,7 @@ type LatLngLike = { lat: number; lng: number }
 /**
  * Effet d'un clic simple sur la carte.
  *  - `select`   : sélectionner l'élément cliqué (ou vider la sélection) ;
- *  - `toolNode` : clic de nœud d'un outil à deux clics (onde verte, ajout de tronçon) ;
+ *  - `toolNode` : clic de nœud d'un outil à deux clics (onde verte, itinéraires, ajout de tronçon) ;
  *  - `addNode`  : poser un nœud à l'endroit cliqué ;
  *  - `none`     : clic ignoré (outil à deux clics, hors de tout nœud).
  */
@@ -74,6 +74,7 @@ export function mapClickAction(tool: MapTool, hit: Selection): MapClickAction {
 /** Libellé du bandeau rappelant l'outil actif (et permettant d'en sortir). */
 const OUTIL_ACTIF: Record<Exclude<MapTool, 'select'>, string> = {
   greenwave: S.carte.outilOndeVerteActif,
+  itineraires: S.carte.outilItinerairesActif,
   addEdge: S.carte.outilAjoutTronconActif,
   addNode: S.carte.outilPoseNoeudActif,
 }
@@ -225,6 +226,9 @@ export function MapView(): JSX.Element {
         showLabels: state.ui.showLabels,
         showVehicles: state.ui.showVehicles,
         tool: state.ui.tool,
+        // Périmés (le réseau a changé depuis le calcul), les itinéraires ne sont plus dessinés : le
+        // panneau propose alors de les recalculer.
+        itineraires: state.ui.itineraires?.perime ? null : state.ui.itineraires,
         toolNodes: state.ui.toolNodes,
         toolPath,
         frame: state.sim.frame,
@@ -247,7 +251,7 @@ export function MapView(): JSX.Element {
       const key = `${state.ui.tool}:${from}>${hover}`
       if (key === toolPathKey) return
       toolPathKey = key
-      toolPath = state.ui.tool === 'greenwave'
+      toolPath = state.ui.tool === 'greenwave' || state.ui.tool === 'itineraires'
         ? shortestPathNodes(project.network, from, hover)
         : [from, hover]
     }

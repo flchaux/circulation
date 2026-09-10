@@ -310,33 +310,39 @@ describe('validateProject — réparation des dossiers mal formés', () => {
 /*  Store : import des dossiers et plan imposé                         */
 /* ------------------------------------------------------------------ */
 
-/** Fichier de dossiers réduit au strict nécessaire, au format documenté en §14. */
-function fichierDossiers(): unknown {
+/**
+ * Dossier d'un carrefour réduit au strict nécessaire, au format documenté en §14 : un fichier, un
+ * carrefour, sous les métadonnées de commune que porte la racine du fichier livré par la mairie.
+ */
+function dossierVE005(): Record<string, unknown> {
   return {
     commune: 'Veauche (Loire, 42340)',
-    nombre_dossiers: 1,
-    carrefours: [{
-      id: 'VE005',
-      nom: 'VE005 Croix de Borne / Libération',
-      voies: ['Avenue de la Libération', 'Rue de la Croix de Borne'],
-      identification: { controleur: 'SEREL CTM 2000' },
-      groupes: [
-        { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
-        { id: 'V3', type: 'vehicule', voie: 'Rue de la Croix de Borne' },
-        { id: 'P2', type: 'pieton', voie: 'Avenue de la Libération' },
-      ],
-      phases: [
-        { nom: 'Phase A Repos', vehicules: ['V1'], pietons: [], mini_s: 15, maxi_s: 40 },
-        { nom: 'Phase B', vehicules: ['V3'], pietons: ['P2'], mini_s: 10, maxi_s: 25 },
-      ],
-      plans_de_feux: [
-        { nom: 'PF1', periode: 'Heures de pointe', cycle_s: 74, phases: [{ nom: 'Phase A Repos', mini_s: 15, maxi_s: 40 }, { nom: 'Phase B', mini_s: 10, maxi_s: 25 }] },
-        { nom: 'PF2', periode: 'Heures creuses', cycle_s: 60, phases: [{ nom: 'Phase A Repos', mini_s: 12, maxi_s: 30 }, { nom: 'Phase B', mini_s: 8, maxi_s: 20 }] },
-      ],
-      calendrier: { lundi_vendredi: [{ plage: '06:00-09:00', plan: 'PF1' }, { plage: '09:00-16:30', plan: 'PF2' }] },
-      matrice_inter_verts: { groupes: ['V1', 'V3', 'P2'], valeurs: { V1: { V3: 6, P2: 5 }, V3: { V1: 6 }, P2: { V1: 5 } }, valeur_jaune_s: { V1: 3, V3: 3 } },
-    }],
+    date_extraction: '2026-09-07',
+    id: 'VE005',
+    nom: 'VE005 Croix de Borne / Libération',
+    voies: ['Avenue de la Libération', 'Rue de la Croix de Borne'],
+    identification: { controleur: 'SEREL CTM 2000' },
+    groupes: [
+      { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
+      { id: 'V3', type: 'vehicule', voie: 'Rue de la Croix de Borne' },
+      { id: 'P2', type: 'pieton', voie: 'Avenue de la Libération' },
+    ],
+    phases: [
+      { nom: 'Phase A Repos', vehicules: ['V1'], pietons: [], mini_s: 15, maxi_s: 40 },
+      { nom: 'Phase B', vehicules: ['V3'], pietons: ['P2'], mini_s: 10, maxi_s: 25 },
+    ],
+    plans_de_feux: [
+      { nom: 'PF1', periode: 'Heures de pointe', cycle_s: 74, phases: [{ nom: 'Phase A Repos', mini_s: 15, maxi_s: 40 }, { nom: 'Phase B', mini_s: 10, maxi_s: 25 }] },
+      { nom: 'PF2', periode: 'Heures creuses', cycle_s: 60, phases: [{ nom: 'Phase A Repos', mini_s: 12, maxi_s: 30 }, { nom: 'Phase B', mini_s: 8, maxi_s: 20 }] },
+    ],
+    calendrier: { lundi_vendredi: [{ plage: '06:00-09:00', plan: 'PF1' }, { plage: '09:00-16:30', plan: 'PF2' }] },
+    matrice_inter_verts: { groupes: ['V1', 'V3', 'P2'], valeurs: { V1: { V3: 6, P2: 5 }, V3: { V1: 6 }, P2: { V1: 5 } }, valeur_jaune_s: { V1: 3, V3: 3 } },
   }
+}
+
+/** Ce dossier tel qu'il arrive à l'import : le texte du fichier choisi par l'exploitant. */
+function fichierDossier(dossier: Record<string, unknown> = dossierVE005()): string {
+  return JSON.stringify(dossier)
 }
 
 /** Store de test : client moteur factice, pas d'autosauvegarde. `controller` nul = carrefour sans feux. */
@@ -364,49 +370,56 @@ function setup(controller: SignalController | null) {
   }
 }
 
-describe('store — import de dossiers de carrefour', () => {
-  it('rattache le dossier, journalise l’opération et reste annulable', () => {
-    const { store, s } = setup(null)
-    const bilan = s().importDossiersFeux(JSON.stringify(fichierDossiers()))
+describe('store — import du dossier d’un carrefour', () => {
+  it('applique le dossier au carrefour sélectionné, journalise l’opération et reste annulable', () => {
+    const { store, s } = setup(controleurSimple())
+    const bilan = s().importDossierFeux('c1', fichierDossier())
 
-    expect(bilan.matches).toBe(1)
-    expect(bilan.nonRattaches).toBe(0)
-    const controllers = Object.values(s().project?.network.controllers ?? {})
-    expect(controllers).toHaveLength(1)
-    const controller = controllers[0]
-    expect(controller.groups?.length).toBeGreaterThan(0)
-    expect(controller.plans?.length).toBe(2)
-    expect(controller.source).toBeTruthy()
-    expect(s().project?.network.controls.c?.type).toBe('signals')
-    expect(s().project?.network.controls.c?.controllerId).toBe(controller.id)
-    expect(s().project?.changes.at(-1)?.label).toMatch(/dossier/i)
+    expect(bilan.applique).toBe(true)
+    expect(bilan.dossierId).toBe('VE005')
+    const controller = s().project?.network.controllers.c1
+    expect(controller?.groups?.length).toBeGreaterThan(0)
+    expect(controller?.plans?.length).toBe(2)
+    expect(controller?.source).toBe('dossier VE005')
+    // Le carrefour garde son contrôleur et sa régulation : le dossier remplace le plan, rien d'autre.
+    expect(Object.keys(s().project?.network.controllers ?? {})).toEqual(['c1'])
+    expect(s().project?.network.controls.c?.controllerId).toBe('c1')
+    expect(s().project?.changes.at(-1)?.label).toMatch(/VE005/)
     expect(s().canUndo).toBe(true)
 
     store.getState().undo()
-    expect(Object.keys(s().project?.network.controllers ?? {})).toHaveLength(0)
-    expect(s().project?.network.controls.c).toBeUndefined()
+    expect(s().project?.network.controllers.c1.source).toBeUndefined()
+    expect(s().project?.network.controllers.c1.plans).toBeUndefined()
   })
 
   it('ne touche à rien et explique pourquoi si le fichier est illisible', () => {
-    const { s } = setup(null)
+    const { s } = setup(controleurSimple())
     const avant = s().project?.network
-    const bilan = s().importDossiersFeux('ceci n’est pas du JSON')
-    expect(bilan.matches).toBe(0)
+    const bilan = s().importDossierFeux('c1', 'ceci n’est pas du JSON')
+    expect(bilan.applique).toBe(false)
     expect(bilan.avertissements.length).toBeGreaterThan(0)
     expect(s().project?.network).toBe(avant)
     expect(s().canUndo).toBe(false)
   })
 
-  it('rend compte des dossiers qu’aucun carrefour ne peut recevoir', () => {
+  it('ne fait rien quand le carrefour visé n’est plus à feux', () => {
     const { s } = setup(null)
-    const fichier = fichierDossiers() as { carrefours: Record<string, unknown>[] }
-    fichier.carrefours[0].voies = ['Rue de nulle part']
-    fichier.carrefours[0].groupes = [{ id: 'V1', type: 'vehicule', voie: 'Rue de nulle part' }]
-    const bilan = s().importDossiersFeux(JSON.stringify(fichier))
-    expect(bilan.matches).toBe(0)
-    expect(bilan.nonRattaches).toBe(1)
-    expect(bilan.avertissements.join(' ')).toMatch(/VE005/)
+    const bilan = s().importDossierFeux('c1', fichierDossier())
+    expect(bilan.applique).toBe(false)
+    expect(bilan.avertissements.join(' ')).toMatch(/plus à feux/)
     expect(Object.keys(s().project?.network.controllers ?? {})).toHaveLength(0)
+  })
+
+  it('applique le dossier en signalant les groupes que le carrefour ne porte pas', () => {
+    const { s } = setup(controleurSimple())
+    const dossier = dossierVE005()
+    dossier.groupes = [
+      { id: 'V1', type: 'vehicule', voie: 'Avenue de la Libération' },
+      { id: 'V3', type: 'vehicule', voie: 'Rue de nulle part' },
+    ]
+    const bilan = s().importDossierFeux('c1', fichierDossier(dossier))
+    expect(bilan.applique).toBe(true)
+    expect(bilan.avertissements.join(' ')).toMatch(/V3.*ne commandent rien/)
   })
 })
 

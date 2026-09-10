@@ -9,6 +9,7 @@
 import type { EdgeId, MovementKey, Network, NodeId } from '@/model/types'
 import type { Movement } from '@/model/geometry'
 import { buildAdjacency, nodeMovements } from '@/model/geometry'
+import { createRng, streamSeed } from './rng'
 
 /** Vitesse libre plancher (km/h) pour éviter les temps de parcours infinis. */
 const MIN_SPEED_KMH = 5
@@ -181,7 +182,7 @@ export function buildGraph(network: Network): EngineGraph {
 /* ----------------------------- Tas binaire ----------------------------- */
 
 /** Tas min sur des couples (clé flottante, valeur entière), sans allocation par opération. */
-class MinHeap {
+export class MinHeap {
   private keys: Float64Array
   private vals: Int32Array
   private n = 0
@@ -549,4 +550,144 @@ export function queueDelay(queue: number, storage: number, dischargeRate: number
   const fill = Math.min(queue / Math.max(1, storage), 1)
   const overflow = Math.min(fill ** OVERFLOW_EXPONENT, MAX_OVERFLOW)
   return queue / dischargeRate / (1 - overflow)
+}
+
+/* ----------------------------- Coût structurel des carrefours (§5.5) ----------------------------- */
+
+/**
+ * Retard qu'impose *a priori* la traversée d'un carrefour, avant toute mesure, tronçon par tronçon.
+ *
+ * C'est la pièce qui manquait au routage : le coût d'un tronçon jamais emprunté valait `longueur ÷
+ * vitesse`, sans un mot des stops, des cédez-le-passage ni des feux qui le jalonnent. Une rue de
+ * lotissement à huit croisements paraissait donc aussi rapide qu'un axe, et le routage y envoyait tout
+ * le monde pour l'apprendre — puis l'oubliait, la mémoire des temps mesurés décroissant vers ce même
+ * temps à vide optimiste. Le terme ci-dessous devient le plancher de cette décroissance : la leçon ne
+ * s'efface plus.
+ *
+ * Trois retards, tous issus de ce que le moteur simule vraiment :
+ *  - **feux** : retard uniforme de Webster à saturation nulle, calculé sur la part de vert de l'approche
+ *    (`signalDelay`, fourni par le moteur de feux) ;
+ *  - **arrêt obligatoire** : le temps d'arrêt puis le temps perdu au redémarrage ;
+ *  - **cession sans arrêt** (cédez-le-passage, priorité à droite, giratoire) : le seul temps perdu au
+ *    redémarrage. L'attente d'un créneau, elle, dépend du flux prioritaire : elle ne peut venir que de
+ *    la mesure, et le terme de file s'en charge quand elle devient bloquante.
+ *
+ * Le retard est rapporté au tronçon d'approche, et non au mouvement : le routeur somme des coûts de
+ * tronçons. Quand les mouvements d'une même approche ne sont pas logés à la même enseigne — tourner à
+ * gauche en cédant, aller tout droit sans céder — c'est leur moyenne qui est retenue.
+ */
+export function structuralDelays(
+  graph: EngineGraph,
+  signalDelay: Float64Array,
+  yielding: Uint8Array,
+  stopRequired: Uint8Array,
+  stopDelay: number,
+  startupLostTime: number,
+): Float64Array {
+  const out = new Float64Array(graph.edgeIds.length)
+  for (let e = 0; e < graph.edgeIds.length; e++) {
+    if (signalDelay[e] > 0) { out[e] = signalDelay[e]; continue }
+    let somme = 0
+    let n = 0
+    for (let k = graph.succStart[e]; k < graph.succStart[e + 1]; k++) {
+      const mv = graph.succList[k]
+      n++
+      if (stopRequired[mv]) somme += stopDelay + startupLostTime
+      else if (yielding[mv]) somme += startupLostTime
+    }
+    out[e] = n > 0 ? somme / n : 0
+  }
+  return out
+}
+
+/* ----------------------------- Amortissement et partage (§5.5) ----------------------------- */
+
+/**
+ * Part de l'observation dans la table de coûts d'un recalcul (α). 1 = remplacement pur, comportement
+ * d'origine ; en dessous, la table précédente est conservée pour le reste.
+ *
+ * Sans amortissement, un axe qui vient de se charger passe d'un coup de 20 à 60 s pendant que le
+ * contournement, non mesuré, reste à son temps à vide : tous les véhicules de l'intervalle suivant y
+ * basculent, l'axe se vide, son coût retombe, et l'intervalle d'après rebascule. La valeur retenue fait
+ * monter le coût en quatre recalculs, ce qui laisse aux deux itinéraires le temps de se rapprocher au
+ * lieu de se relayer.
+ *
+ * Calée sur les dossiers réels de Veauche (quatre graines, deux scénarios) : le retard moyen passe de
+ * 67 s à 22 s sur le réseau sain, de 430 s à 226 s sur un réseau dont un carrefour reste bloqué. En deçà
+ * de 0,5, le gain ne progresse plus mais un itinéraire qui se libère met plus longtemps à être réessayé
+ * (voir `repro-routage.test.ts`) : c'est le défaut inverse, et il ne doit pas revenir par la bande.
+ */
+export const ROUTING_COST_SMOOTHING = 0.5
+
+/**
+ * Nombre de jeux de coûts entre lesquels les véhicules sont répartis (1 = aucun partage).
+ *
+ * L'amortissement retarde les bascules mais ne partage rien : à un instant donné, tous les véhicules
+ * lisent la même table et prennent le même chemin. Chaque véhicule est donc affecté, selon la graine, à
+ * l'un de ces jeux de coûts légèrement perturbés — c'est l'affectation stochastique classique (Burrell) :
+ * deux conducteurs n'estiment pas identiquement le même trajet, et les itinéraires de coûts voisins se
+ * partagent le flux au lieu de se le disputer.
+ */
+export const ROUTE_VARIANTS = 3   // 5 ne fait pas mieux (mesuré) et coûte 20 % de temps de calcul
+
+/**
+ * Amplitude de la perturbation d'un coût de tronçon, en part de ce coût (± cette valeur).
+ *
+ * Assez pour départager des itinéraires de coûts voisins, trop peu pour faire préférer un détour
+ * réellement plus long : à ±15 %, un chemin ne peut l'emporter que sur un concurrent situé à moins de
+ * 30 % de son coût.
+ */
+export const ROUTE_PERTURBATION = 0.15
+
+/**
+ * Table de coûts amortie : `α × observation + (1 − α) × table précédente`, terme à terme.
+ * Rend l'observation telle quelle au premier recalcul (aucune table précédente) ou si α ≥ 1.
+ *
+ * L'amortissement est **asymétrique** : il ne s'applique qu'à la hausse. Une dégradation demande à être
+ * confirmée sur plusieurs recalculs avant de détourner tout le trafic — c'est la sur-réaction à une
+ * hausse qui fait basculer le réseau en bloc. Une amélioration, elle, est prise telle quelle : un
+ * tronçon qui vient de se vider doit pouvoir être réessayé tout de suite, sans quoi on retomberait sur
+ * le défaut inverse, celui de l'itinéraire congestionné puis délaissé à jamais (voir repro-routage).
+ */
+export function smoothCosts(prev: Float64Array | null, observed: Float64Array, alpha: number): Float64Array {
+  if (!prev || alpha >= 1 || prev.length !== observed.length) return observed
+  const a = Math.max(0, alpha)
+  const out = new Float64Array(observed.length)
+  for (let i = 0; i < observed.length; i++) {
+    const o = observed[i]
+    out[i] = o <= prev[i] ? o : a * o + (1 - a) * prev[i]
+  }
+  return out
+}
+
+/**
+ * Facteurs multiplicatifs d'une variante de coûts, tirés une fois pour toute l'exécution.
+ *
+ * Fixes, et non retirés à chaque recalcul : un conducteur ne change pas d'avis sur une rue toutes les
+ * cinq minutes. Un tirage renouvelé ferait osciller les itinéraires sans que rien n'ait changé sur le
+ * terrain, ce qui est exactement le défaut que ces variantes corrigent.
+ *
+ * Les variantes sont **appariées et symétriques**, et la variante 0 n'est pas perturbée du tout :
+ *  - variante 0 : les coûts du modèle, tels quels — le conducteur qui estime juste ;
+ *  - variantes 1 et 2 : un même tirage, appliqué en plus puis en moins ; 3 et 4 : le tirage suivant, etc.
+ *
+ * Sans cet appariement, trois tirages indépendants peuvent tomber du même côté : deux conducteurs sur
+ * trois préféreraient alors un détour plus long, et le partage introduirait un biais au lieu de le
+ * corriger. Ici, la moyenne des perturbations est nulle sur chaque tronçon, quel que soit le nombre de
+ * variantes, et l'itinéraire réellement le plus rapide garde toujours au moins la part de la variante 0.
+ */
+export function variantFactors(count: number, seed: number, variant: number, amplitude: number): Float64Array {
+  const out = new Float64Array(count).fill(1)
+  if (amplitude <= 0 || variant <= 0) return out
+  const paire = Math.ceil(variant / 2)
+  const signe = variant % 2 === 1 ? 1 : -1
+  const rng = createRng(streamSeed(seed, `route-variant:${paire}`))
+  for (let i = 0; i < count; i++) out[i] = 1 + signe * amplitude * (2 * rng() - 1)
+  return out
+}
+
+/** Coûts d'une variante : la table amortie, tronçon par tronçon, multipliée par ses facteurs. */
+export function applyVariant(cost: Float64Array, factors: Float64Array, out: Float64Array): Float64Array {
+  for (let i = 0; i < cost.length; i++) out[i] = cost[i] * factors[i]
+  return out
 }

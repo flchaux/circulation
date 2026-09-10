@@ -38,6 +38,7 @@ src/engine/protocol.ts            protocole worker (contrat)
 src/engine/rng.ts                 [B] PRNG déterministe (sfc32 + splitmix32), flux nommés
 src/engine/demand.ts              [B] génération des arrivées (variables aléatoires communes)
 src/engine/routing.ts             [B] Dijkstra sur tronçons avec interdictions de tourner, tables par destination
+src/engine/itineraires.ts         [B] les k itinéraires les plus courts entre deux nœuds (Yen), pour l'outil de carte
 src/engine/signals.ts             [B] contrôleurs de feux (fixe, adaptatif, clignotant), états par mouvement
 src/engine/priority.ts            [B] règles de priorité hors feux, créneaux critiques, capacité de cession
 src/engine/simulation.ts          [B] classe Simulation (files, décharge, remontées, stats)
@@ -53,7 +54,7 @@ src/ui/map/MapView.tsx            [D] carte Leaflet + calque canvas, interaction
 src/ui/map/renderer.ts            [D] dessin du réseau, des véhicules, des feux, des couleurs par indicateur
 src/ui/map/colors.ts              [D] échelles de couleur par mode
 src/ui/panels/*.tsx               [E] panneaux latéraux (Ville, Réseau, Feux, Trafic, Résultats, Comparer)
-src/ui/components/*.tsx           [E] composants partagés (champs numériques, tableaux triables, graphique SVG)
+src/ui/components/*               [E] composants partagés (champs numériques, tableaux triables, recherche, graphique SVG)
 src/ui/App.tsx, src/main.tsx      [E] coquille : barre supérieure, onglets, carte, légende
 src/styles.css                    [E]
 ```
@@ -72,6 +73,11 @@ signale les besoins d'évolution des contrats dans son compte rendu.
   (`MovementKey` = `from>to`) avec le type `protected` (sans cession) ou `permitted` (cède aux mouvements verts en conflit).
   Les tronçons **internes** au regroupement (les deux extrémités dans `nodeIds`) sont toujours franchissables :
   seuls les mouvements dont l'approche vient de l'extérieur du regroupement sont pilotés par les phases.
+  Le regroupement se construit depuis le panneau Feux (`setControllerNodes`) : c'est le cas d'une armoire qui
+  commande un carrefour décalé, qu'OpenStreetMap découpe en deux nœuds voisins, ou deux carrefours proches.
+  Un nœud n'appartient qu'à **un** contrôleur : le regrouper le retire du sien, qui disparaît s'il n'en garde
+  aucun — deux contrôleurs sur les mêmes mouvements donneraient au carrefour deux plans de feux simultanés.
+  Un dossier de carrefour importé s'applique à l'ensemble des nœuds du contrôleur (§14).
 - Cycle d'un contrôleur = Σ(vert + orange + rouge intégral) des phases (orange/rouge intégral de la phase ou du contrôleur).
 - `Demand.entries`/`exits` sont indexés par identifiant de nœud frontière. `reconcileDemand()` les resynchronise après
   toute modification du réseau (entrées créées avec `estimated: true`, entrées orphelines supprimées).
@@ -210,10 +216,18 @@ toute la simulation (numérotation dans l'ordre des arrivées) pour permettre l'
 ### 5.5 Itinéraires (`routing.ts`)
 - Graphe de tronçons : successeurs de `e` = `nodeMovements(network, e.to)` filtrés sur `from === e`. Tronçons fermés exclus.
   Un tronçon dont `to` est un nœud frontière n'a aucun successeur (`nodeMovements` renvoie `[]`) : on ne traverse pas la frontière.
-- Coût = temps de parcours libre `length / v`. En routage dynamique, le coût est recalculé toutes les
-  `routingIntervalMin` minutes (et à t = 0) sur **l'état courant** du tronçon, et non sur le seul souvenir de
-  ses derniers passages :
-  `coût = max(EMA des temps mesurés ramenée vers le temps libre, tempsLibre + retard de la file présente)`.
+- **Temps de référence** d'un tronçon = temps de parcours libre `length / v` **+ retard structurel du
+  carrefour qu'il aborde** (`structuralDelays`) : retard uniforme de Webster à saturation nulle pour un feu
+  (`C (1 − part de vert)² / 2`, part de vert fournie par le moteur de feux), temps d'arrêt + temps perdu au
+  redémarrage pour un stop, temps perdu au redémarrage pour une cession sans arrêt. Sans ce terme, le coût
+  d'un tronçon jamais emprunté ne contenait que sa longueur : une rue de lotissement à huit croisements
+  paraissait aussi rapide qu'un axe, le routage y envoyait tout le monde pour l'apprendre à ses dépens —
+  puis l'oubliait, la mémoire des mesures décroissant vers ce même temps à vide optimiste. Le temps de
+  référence est le plancher de cette décroissance : la leçon ne s'efface plus. Il s'applique aussi en
+  routage statique, où il est simplement une meilleure estimation du temps de parcours.
+- En routage dynamique, le coût est recalculé toutes les `routingIntervalMin` minutes (et à t = 0) sur
+  **l'état courant** du tronçon, et non sur le seul souvenir de ses derniers passages :
+  `coût = max(EMA des temps mesurés ramenée vers le temps de référence, référence + retard de la file présente)`.
   - La moyenne des temps mesurés n'est alimentée qu'à la sortie d'un véhicule. Sans correctif, un tronçon que
     le routage cesse d'alimenter n'est plus jamais mesuré : sa moyenne reste figée sur la congestion passée,
     le routage continue de l'éviter, et rien ne le réhabilite. Elle décroît donc vers le temps libre en
@@ -224,15 +238,52 @@ toute la simulation (numérotation dans l'ordre des arrivées) pour permettre l'
     partir de la file moyenne présente, du stockage et du débit de décharge.
   - La file retenue est une moyenne glissante et non un relevé instantané : pris au hasard dans un cycle de
     feux, un relevé donne tantôt le creux tantôt la pointe et fait osciller le routage d'un itinéraire à l'autre.
-  - Limite connue : l'affectation reste « tout ou rien », tous les véhicules d'un intervalle prenant le même
-    itinéraire. Quand la demande dépasse la capacité de l'itinéraire choisi, le partage alterne d'un intervalle
-    au suivant au lieu de se répartir. Un intervalle de recalcul plus court lisse le phénomène.
+  - **Amortissement à la hausse** (`smoothCosts`, α = 0,5) : la table observée ne remplace pas la précédente,
+    elle s'y mêle — mais seulement quand le coût monte. Une dégradation doit être confirmée sur plusieurs
+    recalculs avant de détourner le trafic, alors qu'un tronçon qui vient de se vider est réessayé tout de
+    suite. Sans cette asymétrie, on retomberait sur le défaut inverse : l'itinéraire congestionné puis
+    délaissé à jamais (`repro-routage.test.ts`).
+  - **Partage entre variantes** (`variantFactors`, 3 jeux de coûts, ±15 %) : chaque véhicule est affecté,
+    selon la graine et son rang d'arrivée, à l'un de trois jeux de coûts — celui du modèle, et deux
+    perturbés en sens opposés (variantes appariées : la moyenne des perturbations est nulle sur chaque
+    tronçon, et l'itinéraire réellement le plus rapide garde au moins la part de la variante non perturbée).
+    Deux itinéraires de coûts voisins se partagent ainsi le flux au lieu de se le disputer d'un intervalle
+    à l'autre. C'est l'affectation stochastique de Burrell, et elle ne s'applique qu'en routage dynamique :
+    sans recalcul, le plus court chemin doit rester le plus court chemin.
+  - Effet mesuré sur les dossiers réels de Veauche (4 graines, 60 min), retard moyen — réseau sain, puis
+    même réseau avec un carrefour bloqué : 67 s / 430 s à l'origine ; 21 s / 226 s avec l'amortissement et
+    le partage ; **15 s / 41 s** une fois le coût de carrefour ajouté, soit le niveau du routage statique
+    (15 s / 39 s) sans en perdre les bénéfices (sur la démonstration chargée à 4 600 véhicules, le routage
+    dynamique reste meilleur que le statique : 150 s contre 182 s). L'amortissement seul ne suffit pas
+    (53 s / 549 s) : il ne partage rien, et sur un réseau saturé il retarde surtout la fuite.
+  - **Essayé et écarté** : borner la part du flux qui bascule à chaque recalcul, en ne rafraîchissant
+    qu'une variante sur trois à tour de rôle (moyennes successives sur les flux). Mesuré : 55 s / 387 s,
+    soit nettement pire que sans. La raison est symétrique de l'effet recherché — deux tiers des véhicules
+    gardent une vision du réseau vieille de cinq à quinze minutes, et continuent donc de s'engouffrer dans
+    un contournement déjà saturé. Le défaut ne venait pas de la vitesse d'adaptation mais de l'estimation
+    elle-même : c'est le coût de carrefour qui le corrige.
+  - Limite qui demeure : à l'intérieur d'une variante, l'affectation reste « tout ou rien » — trois jeux de
+    coûts partagent le flux en trois, pas en un continuum. Un équilibre au sens strict demanderait une
+    affectation itérative (Frank-Wolfe) que le moteur, qui simule en temps réel, ne peut pas faire.
 - Destinations « sortie » : Dijkstra inverse par nœud de sortie → `costToGo[edge]` (Float64Array), itinéraire construit
   par descente gloutonne (`argmin cost(e') + costToGo(e')`) au moment de l'injection.
 - Destinations « tronçon interne » : Dijkstra direct à cible unique depuis le tronçon d'origine, cache `(origine, destination)`
   vidé à chaque recalcul. Itinéraire = liste d'indices de tronçons, du premier tronçon (sortant de l'entrée, ou tronçon d'origine)
   au dernier (entrant dans la sortie, ou tronçon de destination).
 - `shortestPathNodes(network, from, to)` utilitaire exporté (onde verte, ajout de tronçon) : chemin en nœuds sur temps libre.
+- **Les k itinéraires les plus courts** (`itineraires.ts`, outil de carte « itinéraires », §7) :
+  `itinerairesLesPlusCourts(network, from, to, { count, settings })` rend les `count` chemins (5 par défaut) les
+  plus rapides d'un nœud à un autre, du meilleur au moins bon, sans boucle ni doublon. Algorithme de Yen sur le
+  **même** graphe de tronçons que le moteur : sens uniques, interdictions de tourner, demi-tours, tronçons fermés
+  et nœuds frontières s'appliquent donc sans qu'on ait à les redire. Les coûts sont ceux du temps de référence
+  ci-dessus (`settings` fournis : `SignalEngine` + `buildPriorityTables` + `structuralDelays`), à ceci près que le
+  retard d'un carrefour n'est compté que s'il est **traversé** — le dernier tronçon n'en subit rien, on y arrive.
+  Le retard porte donc l'arc du graphe (transition tronçon → tronçon) et non le sommet, ce qui reste un Dijkstra à
+  coûts positifs. Un itinéraire affiché est ainsi un itinéraire que la simulation pourrait choisir, et son temps
+  celui qu'elle lui prête à réseau vide. Le nombre de recherches est plafonné (`MAX_RECHERCHES`) : au-delà, la
+  liste est complétée par les meilleurs candidats déjà rencontrés — ce sont de vrais itinéraires, seul leur rang
+  exact n'est plus garanti. Mesure sur Veauche (1 638 tronçons), traversée de la commune de bout en bout : 5
+  itinéraires en ~90 ms, calcul synchrone dans le fil de l'interface.
 
 ### 5.6 Priorités hors feux (`priority.ts`)
 Pour chaque nœud non signalisé (ou `flashing`/`off`), précalculer par mouvement `m` la liste des mouvements auxquels il cède.
@@ -340,10 +391,26 @@ carte à droite avec légende (mode de couleur) et bascule fond de carte / véhi
 - Dessin : tronçons (largeur selon voies et zoom, couleur selon `colorMode`, tronçons fermés hachurés, sens unique : chevrons),
   nœuds (cercle ; frontière : carré ; feux : icône), état des feux au niveau des lignes d'arrêt (point vert/orange/rouge par approche
   externe pilotée), véhicules (rectangles orientés le long de la polyligne, interpolés entre frames), étiquettes (noms de rue,
-  valeurs numériques du mode de couleur au zoom ≥ 16), surbrillance sélection/survol, chemin en cours (outil onde verte).
+  valeurs numériques du mode de couleur au zoom ≥ 16), surbrillance sélection/survol, chemin en cours (outil onde verte),
+  itinéraires comparés (outil « itinéraires »).
+- **Itinéraires comparés** : les cinq chemins les plus courts entre deux nœuds (§5.5) sont dessinés sur le calque
+  statique, par-dessus les étiquettes, du plus lent au plus rapide pour que le meilleur reste visible là où tous se
+  superposent — ce qui est le cas de l'essentiel de leur longueur. Chaque ruban porte la couleur de son rang
+  (`itineraireColor`, cinq teintes franchement séparées) et est **écarté latéralement** d'un rang à l'autre
+  (`offsetPolyline`, 3,5 px) : là où deux itinéraires se confondent on lit une bande rayée, là où ils divergent
+  chaque ruban part de son côté. Le temps de parcours est écrit dans une étiquette posée sur un tronçon qui
+  n'appartient qu'à cet itinéraire — au milieu du trajet, les cinq étiquettes se superposeraient sur la partie
+  commune. Survoler une ligne du tableau (`ui.itineraires.actif`) met son itinéraire au premier plan et estompe
+  les autres. Un aperçu périmé (réseau modifié depuis le calcul) n'est pas dessiné : `MapView` le remplace par
+  `null` dans la scène et le panneau propose de recalculer.
+- Étiquettes : les valeurs sont posées d'abord, les noms de rue ensuite (repli, une fois par nom), dans une grille d'occupation
+  qui réserve le **rectangle** de chaque étiquette — un nom ne prend donc jamais la place d'un chiffre et rien ne se chevauche.
+  Les deux sens d'un tronçon à double sens tiennent dans une **seule** étiquette à deux lignes, posée entre les deux chaussées,
+  chaque ligne précédée d'une flèche orientée dans le sens qu'elle chiffre et coloriée par l'échelle ; sur un sens unique,
+  l'étiquette reste à une ligne, la couleur de l'échelle passant par le trait sous le chiffre.
 - Interactions : clic = sélection (tolérance 8 px, nœuds prioritaires), glisser d'un nœud = `beginNodeDrag`/`dragNode`/`endNodeDrag`
   (Leaflet `dragging` désactivé pendant), dépôt sur un autre nœud (surligné) = fusion, `Suppr` = supprimer la sélection,
-  molette = zoom Leaflet, outils à deux clics via `toolClickNode`. L'outil `addNode` fait exception : il agit
+  molette = zoom Leaflet, outils à deux clics via `toolClickNode` (onde verte, ajout de tronçon, itinéraires). L'outil `addNode` fait exception : il agit
   sur un clic **n'importe où** et non sur un clic de nœud, la décision étant prise par `mapClickAction(tool, hit)`
   (pure, donc vérifiable sans navigateur). Un nœud posé naît isolé : il ne devient utile qu'une fois raccordé
   avec « Ajouter un tronçon », ce que dit l'aide de l'outil.
@@ -356,19 +423,29 @@ carte à droite avec légende (mode de couleur) et bascule fond de carte / véhi
 - **Réseau** : selon la sélection. Nœud : label, type de régulation (liste), approches qui s'arrêtent/cèdent (cases), matrice
   d'interdictions de tourner (approches × sorties), supprimer. Tronçon : nom, classe, voies, vitesse (avec badge « estimée »),
   sens (sens unique / inverser / double sens), fermé, appliquer aussi au sens opposé, supprimer. Sans sélection : aide + outils
-  (ajouter un tronçon, onde verte).
+  (poser un nœud, ajouter un tronçon, onde verte, itinéraires). Sous les outils, le résultat de l'outil
+  « itinéraires » : les cinq chemins classés (rang et pastille de couleur, temps, écart au plus rapide, longueur,
+  carrefours traversés), le survol d'une ligne mettant l'itinéraire correspondant en avant sur la carte. Le bloc
+  survit au changement d'outil — la comparaison sert à décider d'une modification, qu'il faut pouvoir faire sans
+  perdre la réponse — mais pas à une modification du réseau, qui le périme et propose un recalcul.
 - **Feux** : liste des contrôleurs (nom, nœuds, cycle, mode, avertissements de validation) ; éditeur : mode, décalage, orange,
   rouge intégral, phases (cartes réordonnables : nom, vert, min/max/gap en adaptatif, schéma du carrefour cliquable : chaque
   mouvement = flèche, cycle clic : rouge → protégé → permis), ajouter/supprimer une phase, régénérer, diagramme temporel du cycle
   (barres par phase). Schéma : approches placées par `approachAngle`, flèches courbes vers `exitAngle`.
-- **Trafic** : curseur global, graine, tableau des entrées (label, classe, débit, activée, estimé), sorties (poids), mode de
+- **Trafic** : curseur global, graine, tableau des entrées (label, classe, débit, activée, estimé, recherche), sorties (poids, recherche), mode de
   destination, matrice OD (tableau éditable, parts en %), trafic interne, import/export CSV, réglages de simulation (durée,
   chauffe, routage dynamique, paramètres avancés repliés).
-- **Résultats** : synthèse réseau (tuiles), tableaux triables tronçons / sorties / carrefours (clic = sélection sur la carte),
+- **Résultats** : synthèse réseau (tuiles), tableaux triables et filtrables tronçons / sorties / carrefours (clic = sélection sur la carte),
   courbe temporelle de l'élément sélectionné (SVG), export CSV des tableaux, mode de couleur de la carte.
 - **Comparer** : « Figer comme référence » (avec ses résultats), tableau référence / variante / écart pour la synthèse,
   écarts par tronçon et par sortie (tri par |Δ|), boutons carte Δ retard / Δ débit, effacer la référence.
-- Composants : `NumberField` (validation, unités), `DataTable` (tri, formatage), `Sparkline`/`LineChart` SVG, `Modal`.
+- Composants : `NumberField` (validation, unités), `DataTable` (tri, filtrage, formatage), `ChampRecherche`,
+  `Sparkline`/`LineChart` SVG, `Modal`.
+- **Recherche rapide** : toute liste d'au moins `SEUIL_RECHERCHE` lignes (tronçons, carrefours à feux, entrées, sorties)
+  porte un champ de recherche. La comparaison ignore casse, accents et forme de l'apostrophe ; les mots saisis sont
+  cumulatifs et sans ordre imposé (`src/ui/components/recherche.ts`). Dans un `DataTable`, le filtre porte sur les colonnes
+  textuelles et s'applique **avant** le bornage `maxRows` : une voie est trouvée même au-delà des lignes affichées.
+  Pour les carrefours à feux, la recherche porte aussi sur les rues qui s'y croisent.
 - Toutes les chaînes en français dans `src/ui/strings.ts`. Nombres formatés `fr-FR`.
 
 ## 8. Tests et qualité
@@ -425,6 +502,21 @@ export function randomInt(rng: () => number, maxExclusive: number): number
 // src/engine/routing.ts                                                            [B]
 export function shortestPathNodes(network: Network, from: NodeId, to: NodeId): NodeId[]   // [] si aucun chemin
 
+// src/engine/itineraires.ts                                                        [B]
+export const NB_ITINERAIRES = 5
+export interface Itineraire {
+  edges: EdgeId[]        // tronçons empruntés, du départ à l'arrivée
+  nodes: NodeId[]        // nœuds traversés (edges.length + 1)
+  time: number           // temps à réseau vide (s), retard des carrefours traversés compris
+  length: number         // longueur cumulée (m)
+}
+export function itinerairesLesPlusCourts(
+  network: Network,
+  from: NodeId,
+  to: NodeId,
+  opts?: { count?: number; settings?: SimSettings },
+): Itineraire[]          // du plus rapide au plus lent ; [] si nœuds confondus, inconnus ou non reliés
+
 // src/engine/simulation.ts                                                         [B]
 export class Simulation {
   constructor(init: EngineInit)
@@ -472,17 +564,13 @@ export function validateProject(value: unknown): { ok: true; project: Project } 
 // src/model/signals.ts — dossiers de carrefour (voir §14)
 export function phaseMovements(controller: SignalController, phase: SignalPhase): Record<MovementKey, GreenKind>
 
-// src/geo/dossierFeux.ts — import d'un fichier de dossiers de carrefour (voir §14)
-export interface DossierMatch {
-  dossierId: string; nom: string; nodeId: NodeId | null; controllerId: ControllerId | null
-  confiance: 'sure' | 'probable' | 'incertaine' | 'aucune'; raison: string
+// src/geo/dossierFeux.ts — import du dossier d'un carrefour (voir §14)
+export interface DossierImportResult {
+  controller: SignalController | null      // remplace celui du carrefour désigné ; null si rien n'a été lu
+  dossierId: string; nom: string
   groupesRattaches: number; groupesNonRattaches: string[]; avertissements: string[]
 }
-export interface DossierImportResult {
-  controllers: Record<ControllerId, SignalController>; controls: Record<NodeId, NodeControl>
-  matches: DossierMatch[]; avertissements: string[]
-}
-export function importDossiersFeux(raw: unknown, opts: { network: Network }): DossierImportResult
+export function importDossierFeux(contenu: unknown, opts: { network: Network; controllerId: ControllerId }): DossierImportResult
 
 // src/ui/map/colors.ts                                                             [D]
 export interface ColorScale { color(value: number): string; stops: { value: number; color: string }[]; label: string; unit: string }
@@ -495,7 +583,15 @@ export function MapView(): JSX.Element      // lit useAppStore, plein conteneur 
 
 // src/ui/components/*.tsx                                                          [E]
 export function NumberField(props: { label: string; value: number; onChange(v: number): void; min?: number; max?: number; step?: number; unit?: string; estimated?: boolean; disabled?: boolean }): JSX.Element
-export function DataTable<T>(props: { columns: { key: string; label: string; align?: 'left'|'right'; format?(row: T): string; value(row: T): number | string }[]; rows: T[]; rowKey(row: T): string; onRowClick?(row: T): void; selectedKey?: string; initialSort?: { key: string; dir: 'asc'|'desc' }; maxRows?: number }): JSX.Element
+export function DataTable<T>(props: { columns: { key: string; label: string; align?: 'left'|'right'; format?(row: T): string; value(row: T): number | string }[]; rows: T[]; rowKey(row: T): string; onRowClick?(row: T): void; selectedKey?: string; initialSort?: { key: string; dir: 'asc'|'desc' }; maxRows?: number; searchLabel?: string }): JSX.Element
+export function ChampRecherche(props: { value: string; onChange(v: string): void; label: string; testId?: string }): JSX.Element
+
+// src/ui/components/recherche.ts                                                   [E]
+export const SEUIL_RECHERCHE: number          // liste plus courte : pas de champ de recherche
+export function normaliser(texte: string): string
+export function motsDeRecherche(requete: string): string[]
+export function correspond(mots: string[], champs: (string | undefined)[]): boolean
+export function filtrer<T>(lignes: T[], requete: string, champs: (ligne: T) => (string | undefined)[]): T[]
 export function LineChart(props: { series: { label: string; color: string; values: number[] }[]; times: number[]; unit?: string; height?: number }): JSX.Element
 export function Modal(props: { title: string; onClose(): void; children: React.ReactNode }): JSX.Element
 ```
@@ -629,9 +725,23 @@ retard moyen de son carrefour.
 ## 14. Dossiers de carrefour réels
 
 Les communes disposent, pour chaque carrefour à feux, d'un « dossier de carrefour » qui décrit les groupes de
-signaux, les phases, les plans horaires et les temps de sécurité. Un format JSON documenté rassemble ces
-dossiers pour Veauche. Le simulateur sait désormais en représenter et en exploiter la partie qui gouverne la
-circulation.
+signaux, les phases, les plans horaires et les temps de sécurité. Un format JSON documenté les transcrit,
+**un fichier par carrefour** : le dossier est à la racine du fichier, sous les métadonnées de la commune
+(`commune`, `date_extraction`, `glossaire`). Le simulateur sait en représenter et en exploiter la partie
+qui gouverne la circulation.
+
+**C'est l'exploitant qui désigne le carrefour** : il sélectionne le feu sur la carte, puis charge le fichier
+de ce feu depuis le panneau Feux (`importDossierFeux`). Le dossier remplace le plan du contrôleur en place,
+qui garde son identifiant et ses nœuds ; l'opération est annulable. Un fichier qui rassemble plusieurs
+dossiers est refusé et les énumère : rien ne dirait lequel décrit le carrefour choisi. Un fichier de
+l'ancien format qui n'en contient qu'un reste lu tel quel.
+
+Pourquoi ne pas reconnaître le carrefour tout seul ? Cela a été fait, puis retiré. Le rattachement par
+comparaison des noms de voies échouait précisément là où il aurait servi : le plan de la commune et celui
+d'OpenStreetMap ne découpent pas les carrefours de la même façon, un carrefour décalé y devient deux nœuds
+distants d'une dizaine de mètres dont aucun ne réunit toutes les branches du dossier, et sur les six dossiers
+de Veauche quatre finissaient de toute façon en arbitrage manuel. Autant demander le carrefour d'emblée : il
+ne reste alors qu'à rattacher les **groupes** du dossier aux mouvements de ce carrefour-là (§14.3 bis).
 
 ### 14.1 Ce qui est repris et pourquoi
 
@@ -667,32 +777,41 @@ intégral. Sans matrice, `amber` et `allRed` du contrôleur ou de la phase s'app
 
 ### 14.4 Plans horaires
 
-`SimSettings.startTimeOfDayMin` et `dayOfWeek` donnent l'heure simulée à l'instant 0. À chaque cycle, le
+`SimSettings.startTimeOfDayMin` et `dayOfWeek` donnent l'heure simulée à l'instant 0. Ce sont des réglages
+**de la commune**, pas du carrefour : ils se règlent avec les autres réglages de simulation (onglet Trafic),
+et le panneau Feux n'en montre que l'effet — le plan que le calendrier de chaque contrôleur désigne à cette
+heure-là. À chaque cycle, le
 contrôleur sélectionne le plan dont la plage horaire couvre l'heure courante ; le changement de plan
 n'intervient qu'en fin de cycle, jamais au milieu d'une phase. Sans `schedule`, le premier plan s'applique en
 permanence ; sans `plans`, les durées portées par les phases font foi.
 
-### 14.3 bis Rattachement au réseau
+### 14.3 bis Rattachement des groupes aux mouvements
 
-Un dossier est rattaché à un carrefour du réseau en comparant ses noms de voies à ceux des tronçons incidents.
-La comparaison tolère les abréviations (Dr, St, Av, Rte…), les apostrophes typographiques, les mots outils
-surnuméraires et un prénom intercalé, sans jamais rapprocher deux voies réellement différentes.
+Le carrefour étant désigné, il reste à savoir quels mouvements chaque groupe de feux commande. Le dossier
+ne le dit que par un nom de voie (« Voiture Av. Libération (arrivée ouest) », « Traversée Rue de Jourcey ») :
+ce nom est comparé à celui des tronçons du carrefour. La comparaison tolère les abréviations (Dr, St, Av,
+Rte…), les apostrophes typographiques, les mots outils surnuméraires et un prénom intercalé, sans jamais
+rapprocher deux voies réellement différentes.
 
-Le score se compte sur les rues **réellement distinctes qui arrivent** au carrefour, et non sur les libellés
-du dossier : une traversée piétonne et la rue qu'elle franchit ne comptent qu'une fois, deux écritures d'une
-même route non plus, et une rue que l'on ne fait que quitter en sens unique n'appartient pas au carrefour.
-Sans ces trois règles, un dossier se rattachait avec certitude au voisin du carrefour qu'il décrit. À nombre
-égal de rues retrouvées, le carrefour dont les rues portent des groupes de feux du dossier l'emporte : la
-liste de voies d'un dossier reprend aussi des repères du plan qui ne sont pas des branches.
+Un groupe véhicule prend les mouvements qui **arrivent** par sa voie ; une traversée piétonne prend ceux qui
+entrent ou sortent par la voie franchie (§14.5). Une voie que le dossier ne désigne que par sa référence
+routière (« RD 1082 ») est résolue par le nom que le dossier lui donne lui-même ailleurs entre parenthèses ;
+à défaut, le groupe reste sans mouvement.
 
-L'importeur **ne devine jamais** : à égalité entre plusieurs carrefours, il ne rattache rien et rend la liste
-des candidats. C'est le cas fréquent des carrefours décalés, qu'OpenStreetMap éclate en deux nœuds distants
-d'une dizaine de mètres dont aucun ne réunit toutes les branches du dossier. Sur les six dossiers de Veauche,
-deux se rattachent seuls et quatre demandent un arbitrage. L'utilisateur tranche depuis le panneau Feux, via
-`rattacherDossier`, et l'opération reste annulable.
+**Deux groupes sur la même rue.** Un dossier nomme couramment deux approches d'une même voie « véhicules
+venant du nord » et « … du sud » : comparés sur le seul nom de rue, les deux groupes commanderaient les
+mêmes mouvements, et la phase qui n'ouvre que le nord ouvrirait aussi le sud — le carrefour simulé
+écoulerait un trafic que le carrefour réel arrête. Quand chaque groupe cite un côté distinct (« venant du,
+branche, côté, arrivée » suivi d'un point cardinal), les mouvements sont répartis d'après la géométrie :
+chacun revient au groupe dont le côté est le plus proche de l'angle du tronçon **qui porte sa voie** — pour
+une traversée piétonne, l'entrée comme la sortie comptent, un mouvement qui traverse le carrefour de part
+en part franchissant bien les deux traversées. La répartition est annoncée comme une déduction à vérifier,
+et abandonnée si elle laissait un groupe sans mouvement : ouvrir trop reste préférable à fermer à tort.
+« direction nord » n'est pas un côté mais un sens de circulation (donc le côté opposé) : il est ignoré.
 
-Le store n'a pas sa propre règle : il appelle `candidatsPourDossier` de l'importeur. Une seconde règle, même
-proche, finirait par proposer à l'arbitrage des carrefours que l'import avait écartés.
+Un groupe qu'aucun mouvement ne porte est **signalé**, jamais rattaché au hasard : il ne commande rien, et
+c'est le signe habituel qu'on a chargé le dossier d'un autre carrefour. Le bilan de l'import le dit en toutes
+lettres, à côté des réserves de lecture du dossier.
 
 ### 14.4 bis Conventions et décisions de modélisation
 

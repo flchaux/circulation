@@ -1,0 +1,171 @@
+{
+  "commune": "Veauche (Loire, 42340)",
+  "objet": "Dossier de carrefour des feux tricolores",
+  "date_extraction": "2026-09-08",
+  "glossaire": {
+    "IV": "inter-vert",
+    "HPM": "heure de pointe du matin",
+    "HC": "heure creuse"
+  },
+  "id": "VE009",
+  "nom": "VE009 Avenue d'Andrézieux / Chemin des Granges",
+  "fichier_source": "VE009-Av_Andrezieux_Chemin_des_Granges.pdf (fixture synthétique)",
+  "voies_plan": [
+    "Avenue d'Andrézieux",
+    "Chemin des Granges"
+  ],
+  "identification": {
+    "numero_carrefour": "VE009",
+    "mode_fonctionnement": {
+      "cyclique": true,
+      "escamotage": true
+    },
+    "nombre_phases_trafic": 3
+  },
+  "groupes": [
+    {
+      "id": "V1",
+      "type": "vehicule",
+      "voie": "Avenue d'Andrézieux"
+    },
+    {
+      "id": "V2",
+      "type": "vehicule",
+      "voie": "Chemin des Granges"
+    },
+    {
+      "id": "P1",
+      "type": "pieton",
+      "voie": "Traversée Chemin des Granges",
+      "pietons_en_rappel": true
+    }
+  ],
+  "phases": [
+    {
+      "nom": "Phase A",
+      "vehicules": [
+        "V1"
+      ],
+      "pietons": [],
+      "mini_s": 20,
+      "maxi_s": 60
+    },
+    {
+      "nom": "Phase B",
+      "vehicules": [
+        "V2"
+      ],
+      "pietons": [
+        "P1"
+      ],
+      "mini_s": 12,
+      "maxi_s": 30
+    },
+    {
+      "nom": "Phase C escamotable",
+      "plan": "PF1",
+      "vehicules": [
+        "V2"
+      ],
+      "pietons": [],
+      "mini_s": 8,
+      "maxi_s": 15,
+      "appel": [
+        "B21"
+      ]
+    }
+  ],
+  "plans_de_feux": [
+    {
+      "nom": "PF1",
+      "periode": "7h-9h et 16h30-19h",
+      "cycle_s": 90,
+      "phases": [
+        {
+          "nom": "Phase A",
+          "mini_s": 30,
+          "maxi_s": 60
+        },
+        {
+          "nom": "Phase B",
+          "mini_s": 15,
+          "maxi_s": 30
+        },
+        {
+          "nom": "Phase C escamotable",
+          "mini_s": 8,
+          "maxi_s": 15
+        }
+      ]
+    },
+    {
+      "nom": "PF2",
+      "periode": "heure creuse",
+      "cycle_s": 60,
+      "phases": [
+        {
+          "nom": "Phase A",
+          "mini_s": 20,
+          "maxi_s": 40
+        },
+        {
+          "nom": "Phase B",
+          "mini_s": 12,
+          "maxi_s": 25
+        }
+      ]
+    }
+  ],
+  "calendrier": {
+    "lundi_vendredi": [
+      {
+        "plage": "07h00-09h00 et 16h30-19h00",
+        "plan": "PF1"
+      },
+      {
+        "plage": "09h00-16h30",
+        "plan": "PF2"
+      }
+    ]
+  },
+  "matrice_inter_verts": {
+    "groupes": [
+      "V1",
+      "V2",
+      "P1"
+    ],
+    "valeur_jaune_s": {
+      "V1": 3,
+      "V2": 3
+    },
+    "valeurs": {
+      "V1": {
+        "V2": 7,
+        "P1": 8
+      },
+      "V2": {
+        "V1": 6
+      },
+      "P1": {
+        "V1": 10
+      }
+    }
+  },
+  "inventaire_materiel": {
+    "marque_controleur": "Bouygues",
+    "armoire": {
+      "cartes_puissance": 4
+    }
+  },
+  "alimentation_electrique": {
+    "numero_pdl": null,
+    "puissance_souscrite": "6 kVA"
+  },
+  "malvoyants": {
+    "marque": "Okeenea"
+  },
+  "voies": [
+    "Avenue d'Andrézieux",
+    "Chemin des Granges"
+  ]
+}

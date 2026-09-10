@@ -274,6 +274,7 @@ export function ResultatsPanel(): JSX.Element {
             <DataTable
               columns={edgeColumns}
               rows={edgeRows}
+              searchLabel={S.resultats.troncons}
               rowKey={(r) => r.id}
               maxRows={MAX_ROWS}
               initialSort={{ key: 'retard', dir: 'desc' }}
@@ -294,6 +295,7 @@ export function ResultatsPanel(): JSX.Element {
             <DataTable
               columns={exitColumns}
               rows={exitRows}
+              searchLabel={S.resultats.sorties}
               rowKey={(r) => r.id}
               maxRows={MAX_ROWS}
               initialSort={{ key: 'vehicules', dir: 'desc' }}
@@ -314,6 +316,7 @@ export function ResultatsPanel(): JSX.Element {
             <DataTable
               columns={nodeColumns}
               rows={nodeRows}
+              searchLabel={S.resultats.carrefours}
               rowKey={(r) => r.id}
               maxRows={MAX_ROWS}
               initialSort={{ key: 'retard', dir: 'desc' }}

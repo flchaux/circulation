@@ -69,11 +69,34 @@ export function formatDuration(seconds: number): string {
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')}`
 }
 
+/**
+ * Durée d'un trajet : « 45 s », « 2 min 10 s », « 1 h 04 min ».
+ *
+ * Plus précise que `formatDuration`, qui arrondit à la minute : deux itinéraires concurrents se tiennent
+ * souvent en quelques dizaines de secondes, et les afficher tous deux à « 7 min » reviendrait à effacer
+ * exactement ce que l'on compare.
+ */
+export function formatDureeTrajet(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '—'
+  const total = Math.max(0, Math.round(seconds))
+  if (total < 60) return `${total} s`
+  const minutes = Math.floor(total / 60)
+  const reste = total % 60
+  if (minutes < 60) return reste ? `${minutes} min ${String(reste).padStart(2, '0')} s` : `${minutes} min`
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`
+}
+
 /** Heure du jour (minutes depuis minuit) : « 8 h 05 ». Une valeur hors de la journée est ramenée dans 0–24 h. */
 export function formatTimeOfDay(minOfDay: number): string {
   if (!Number.isFinite(minOfDay)) return '—'
   const total = ((Math.round(minOfDay) % 1440) + 1440) % 1440
   return `${Math.floor(total / 60)} h ${String(total % 60).padStart(2, '0')}`
+}
+
+/** Valeur d'un `<input type="time">` (« 08:30 ») à partir de minutes depuis minuit. */
+export function heureInput(minOfDay: number): string {
+  const total = Math.max(0, Math.min(1439, Math.round(minOfDay)))
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
 }
 
 /** Date et heure locales (bibliothèque, référence figée). */
@@ -255,6 +278,7 @@ export const S = {
     legende: 'Légende',
     aucuneDonnee: 'Lancez une simulation pour colorer le réseau selon cet indicateur.',
     outilOndeVerteActif: 'Onde verte : cliquez le carrefour de départ puis celui d’arrivée (Échap pour annuler)',
+    outilItinerairesActif: 'Itinéraires : cliquez le nœud de départ puis celui d’arrivée (Échap pour annuler)',
     outilAjoutTronconActif: 'Ajout de tronçon : cliquez deux nœuds (Échap pour annuler)',
     outilPoseNoeudActif: 'Pose d’un nœud : cliquez l’emplacement voulu (Échap pour annuler)',
   },
@@ -293,6 +317,24 @@ export const S = {
     attribution: 'Données',
     aucunReseau: 'Chargez une commune pour construire le réseau.',
   },
+  itineraires: {
+    titre: 'Itinéraires les plus courts',
+    de: 'De',
+    vers: 'vers',
+    rang: 'N°',
+    temps: 'Temps',
+    ecart: 'Écart',
+    longueur: 'Longueur',
+    carrefours: 'Carrefours',
+    carrefoursAide: 'Nombre de carrefours traversés entre le départ et l’arrivée.',
+    aucun: 'Aucun itinéraire ne relie ces deux nœuds : sens uniques, interdictions de tourner ou tronçons fermés les séparent.',
+    perime: 'Le réseau a changé depuis le calcul : les itinéraires ne sont plus affichés.',
+    recalculer: 'Recalculer',
+    effacer: 'Effacer',
+    aide: 'Temps à réseau vide, retard des carrefours traversés compris (feux, stops, cédez-le-passage) — le même coût que celui sur lequel le moteur choisit ses itinéraires.',
+    survolAide: 'Survolez une ligne pour mettre l’itinéraire en avant sur la carte ; les autres s’estompent.',
+    identique: 'Le plus rapide',
+  },
   reseau: {
     titre: 'Réseau',
     aucuneSelection: 'Cliquez sur un tronçon ou un nœud de la carte pour l’examiner et le modifier.',
@@ -302,6 +344,8 @@ export const S = {
     outilOnde: 'Onde verte',
     outilAjout: 'Ajouter un tronçon',
     outilOndeAide: 'Cliquez deux nœuds : les décalages des feux du trajet sont recalculés.',
+    outilItineraires: 'Itinéraires',
+    outilItinerairesAide: 'Cliquez deux nœuds : les cinq itinéraires les plus courts entre eux sont surlignés sur la carte, avec leur temps de parcours.',
     outilAjoutAide: 'Cliquez deux nœuds pour créer un tronçon entre eux.',
     outilNoeud: 'Poser un nœud',
     outilNoeudAide: 'Cliquez l’emplacement voulu sur la carte : un nœud y est posé, puis sélectionné. Il sert à raccorder une voie nouvelle là où OpenStreetMap ne fournit aucun point.',
@@ -348,6 +392,16 @@ export const S = {
     liste: 'Carrefours à feux',
     cycle: 'Cycle',
     noeuds: 'nœuds',
+    /* --- Carrefour regroupé : plusieurs nœuds sous un même contrôleur --- */
+    regroupement: 'Carrefour regroupé',
+    regroupementAide: 'Une armoire commande parfois un carrefour que le fond de carte découpe en deux nœuds voisins (carrefour décalé), ou deux carrefours proches. Regroupés ici, leurs mouvements sont pilotés par ce contrôleur — les tronçons intérieurs au regroupement cessent d’être des branches — et le dossier importé s’applique à l’ensemble.',
+    regroupementNoeuds: 'Nœuds de ce contrôleur',
+    regroupementRetirer: 'Retirer',
+    regroupementRetirerAide: 'Un contrôleur garde au moins un nœud.',
+    regroupementAjouter: 'Ajouter au contrôleur',
+    regroupementVoisins: 'Nœud voisin à regrouper',
+    regroupementAucunVoisin: 'Aucun nœud voisin à regrouper : ce carrefour est seul.',
+    regroupementDejaFeux: 'déjà à feux',
     mode: 'Mode',
     decalage: 'Décalage',
     orange: 'Orange',
@@ -377,28 +431,15 @@ export const S = {
     phaseCourante: 'Phase en cours',
     mouvementsAucun: 'Aucun mouvement piloté : vérifiez la géométrie du carrefour.',
     selectionner: 'Voir sur la carte',
-    /* --- Dossiers de carrefour (docs/ARCHITECTURE.md §14) --- */
-    dossiers: 'Dossiers de carrefour',
-    dossiersAide: 'Fichier JSON des dossiers de la commune : groupes de signaux, phases, plans horaires et inter-verts. Les carrefours reconnus remplacent leur plan actuel.',
-    dossiersImporter: 'Importer des dossiers',
-    dossiersBilan: 'Bilan de l’import',
-    dossiersRattaches: 'carrefour(s) rattaché(s) et repris du dossier',
-    dossiersNonRattaches: 'dossier(s) laissé(s) de côté, faute de carrefour reconnu',
-    dossiersAucun: 'Aucun dossier n’a pu être rattaché : rien n’a été modifié.',
-    dossiersReserves: 'Réserves et anomalies',
-    /* --- Rattachement à la main d'un dossier laissé de côté (§14.3) --- */
-    dossiersARattacher: 'Dossiers à rattacher à la main',
-    dossiersARattacherAide: 'Ces dossiers n’ont pas été appliqués : le plan de la commune et celui du fond de carte ne découpent pas les carrefours de la même façon, plusieurs carrefours portent donc les mêmes rues, ou aucun ne les porte. À vous de désigner le bon.',
-    dossierVoies: 'Voies du dossier',
-    dossierPourquoi: 'Ce qui bloque',
-    dossierCandidats: 'Carrefour à retenir',
-    dossierCandidatsAide: 'Cliquez un carrefour pour le voir sur la carte ; le survol le met en évidence. Si aucun ne convient, sélectionnez-le sur la carte.',
-    dossierAucunCandidat: 'Aucun carrefour ne porte ces voies : sélectionnez-le sur la carte, il apparaîtra ci-dessous.',
-    dossierSurCarte: 'sélectionné sur la carte',
-    dossierSurCarteAucun: 'Aucun carrefour sélectionné sur la carte',
-    dossierVoir: 'voir sur la carte',
-    dossierRuesRetrouvees: 'Rues communes avec le dossier :',
-    dossierRattacher: 'Appliquer ce dossier au carrefour retenu',
+    /* --- Dossier de carrefour (docs/ARCHITECTURE.md §14) --- */
+    dossier: 'Dossier de carrefour',
+    dossierAide: 'Fichier JSON du dossier de CE carrefour, tel que la commune le livre (un fichier par carrefour) : groupes de signaux, phases, plans horaires et inter-verts. Il remplace le plan en place ; l’opération est annulable.',
+    dossierImporter: 'Importer le dossier de ce carrefour',
+    dossierBilan: 'Bilan de l’import',
+    dossierApplique: 'Dossier appliqué :',
+    dossierGroupes: 'groupe(s) de feux rattaché(s) aux mouvements du carrefour',
+    dossierEchec: 'Le dossier n’a pas été appliqué : le carrefour est inchangé.',
+    dossierReserves: 'Réserves et anomalies',
     detacherDossier: 'Détacher le dossier',
     confirmerDetacher: 'Détacher le dossier de ce carrefour ? Ses groupes de signaux, ses plans horaires, son calendrier et ses inter-verts seront remplacés par le plan par défaut à deux phases.',
     origine: 'Origine des réglages',
@@ -424,9 +465,7 @@ export const S = {
     planDurees: 'Durées de vert fixées par le plan',
     planDecalage: 'Décalage imposé par le plan de feux retenu.',
     planPeriodeInconnue: 'sans période',
-    heureSimulee: 'Heure de départ',
-    heureSimuleeAide: 'Heure du jour à l’instant 0 : elle désigne le plan de feux actif de chaque carrefour.',
-    jourSimule: 'Jour',
+    heureSimuleeRappel: 'L’heure et le jour simulés se règlent dans l’onglet Trafic : ils valent pour toute la commune, pas pour ce carrefour.',
     intervertsTitre: 'Inter-verts (s)',
     intervertsAide: 'Temps de sécurité entre le groupe qui perd le vert (en ligne) et celui qui le prend (en colonne). Une case vide signale deux groupes compatibles, qui peuvent être verts ensemble.',
     intervertJaune: 'Jaune',
@@ -471,6 +510,9 @@ export const S = {
     csvCellules: 'cellules origine-destination',
     csvInconnus: 'Identifiants inconnus ignorés',
     reglages: 'Réglages de simulation',
+    heureSimulee: 'Heure de départ',
+    jourSimule: 'Jour',
+    heureSimuleeAide: 'Jour et heure du début de la simulation, pour toute la commune : ils désignent le plan de feux actif de chaque carrefour, et avancent avec le temps simulé.',
     duree: 'Durée simulée',
     chauffe: 'Chauffe',
     chauffeAide: 'Période initiale exclue des statistiques, le temps que le réseau se remplisse.',
@@ -571,6 +613,13 @@ export const S = {
     aucunEcart: 'Aucun écart : les deux exécutions donnent exactement les mêmes valeurs.',
     modifications: 'Modifications depuis la référence',
     aucuneModification: 'Aucune modification enregistrée depuis la référence.',
+  },
+  recherche: {
+    rechercherDans: 'Rechercher dans',
+    placeholder: 'Rechercher…',
+    vider: 'Effacer la recherche',
+    aucune: 'Aucun résultat pour cette recherche.',
+    resultats: '{n} sur {total} correspondent à la recherche',
   },
   unites: {
     s: 's',

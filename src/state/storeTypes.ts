@@ -12,6 +12,7 @@ import type {
   NetNode, NodeControl, NodeId, Project, SignalController, SignalPhase, SimResults, SimSettings,
 } from '@/model/types'
 import type { Frame, SimClientFactory, SimStatus } from '@/engine/protocol'
+import type { Itineraire } from '@/engine/itineraires'
 import type { CommuneSummary, OsmExtract } from '@/geo/types'
 
 export type Selection =
@@ -23,11 +24,33 @@ export type Selection =
 export type ColorMode = 'class' | 'flow' | 'delay' | 'saturation' | 'speed' | 'queue' | 'deltaDelay' | 'deltaFlow'
 export type SidebarTab = 'ville' | 'reseau' | 'feux' | 'trafic' | 'resultats' | 'comparer'
 /**
- * Outil carte : sélection/déplacement, tracé d'onde verte (clic sur deux nœuds), ajout de tronçon
- * (clic sur deux nœuds), pose d'un nœud libre (**un seul clic, n'importe où sur la carte** : c'est le
- * seul outil qui n'attend pas de clic sur un nœud existant, voir `addNode`).
+ * Outil carte : sélection/déplacement, tracé d'onde verte (clic sur deux nœuds), comparaison des cinq
+ * itinéraires les plus courts entre deux nœuds (clic sur deux nœuds, voir `calculerItineraires`), ajout de
+ * tronçon (clic sur deux nœuds), pose d'un nœud libre (**un seul clic, n'importe où sur la carte** : c'est
+ * le seul outil qui n'attend pas de clic sur un nœud existant, voir `addNode`).
  */
-export type MapTool = 'select' | 'greenwave' | 'addEdge' | 'addNode'
+export type MapTool = 'select' | 'greenwave' | 'itineraires' | 'addEdge' | 'addNode'
+
+/**
+ * Résultat de l'outil « itinéraires » : les chemins les plus courts d'un nœud à un autre, surlignés sur la
+ * carte et détaillés dans le panneau Réseau.
+ *
+ * Vit dans l'état d'interface : ni dans le projet, ni dans l'historique, ni dans la sauvegarde — c'est une
+ * question posée au réseau, pas une modification de celui-ci.
+ */
+export interface ApercuItineraires {
+  from: NodeId
+  to: NodeId
+  /** Du plus rapide au plus lent ; vide si aucun chemin ne relie les deux nœuds. */
+  chemins: Itineraire[]
+  /**
+   * Le réseau a changé depuis le calcul : les itinéraires ne sont plus dessinés et le panneau propose de
+   * relancer le calcul. Les afficher tels quels ferait lire des temps qui ne valent plus.
+   */
+  perime: boolean
+  /** Rang mis en avant (survol de la liste), −1 si aucun : les autres sont alors estompés. */
+  actif: number
+}
 
 export interface UiState {
   tab: SidebarTab
@@ -46,6 +69,8 @@ export interface UiState {
    * Un contrôleur absent suit son calendrier horaire (`schedule`) comme dans la réalité.
    */
   planApercu: Record<ControllerId, string>
+  /** Itinéraires comparés par l'outil du même nom, `null` tant qu'aucun n'a été demandé. */
+  itineraires: ApercuItineraires | null
   /** Sélection à recentrer sur la carte (incrémenté par `select(…, { reveal: true })`). */
   revealCounter: number
 }
@@ -90,68 +115,29 @@ export interface CsvImportReport {
   unknown: string[]
 }
 
-/** Bilan d'un import de dossiers de carrefour (docs/ARCHITECTURE.md §14). */
+/**
+ * Bilan de l'import du dossier d'un carrefour (docs/ARCHITECTURE.md §14).
+ *
+ * Vit dans l'état d'interface : ni dans le projet, ni dans l'historique, ni dans la sauvegarde.
+ */
 export interface DossierImportReport {
-  /** Dossiers rattachés à un carrefour du réseau. */
-  matches: number
-  /** Dossiers lus mais laissés de côté, faute de carrefour reconnu de façon certaine. */
-  nonRattaches: number
-  /** Compte rendu en français : raison de chaque rattachement manqué, réserves sur les données reprises. */
+  /** Carrefour à feux visé : le bilan ne s'affiche que dans l'éditeur de ce contrôleur. */
+  controllerId: ControllerId
+  /** Le dossier a remplacé le plan du carrefour. */
+  applique: boolean
+  /** Identifiant du dossier lu (VE001…), vide si le fichier n'a pas pu être lu. */
+  dossierId: string
+  /** Groupes de feux du dossier rattachés à au moins un mouvement du carrefour. */
+  groupes: number
+  /** Compte rendu en français : ce qui n'a pas été repris, les réserves sur ce qui l'a été. */
   avertissements: string[]
 }
 
 /**
- * Carrefour du réseau proposé pour un dossier laissé de côté.
- *
- * Il est désigné par ses rues et jamais par son identifiant OpenStreetMap : celui qui exploite le
- * carrefour le connaît par ses voies, pas par un numéro de nœud qui ne figure sur aucun dossier.
- */
-export interface CarrefourCandidat {
-  nodeId: NodeId
-  /** Rues qui se croisent au carrefour (« Avenue de la Libération / Rue de Jourcey »). */
-  etiquette: string
-  /**
-   * Rues du dossier retrouvées à ce carrefour, dans l'écriture du réseau. C'est sur quoi repose la
-   * proposition : sans cette liste, l'exploitant arbitrerait entre des libellés sans savoir ce qui
-   * les rapproche du dossier.
-   */
-  ruesRetrouvees: string[]
-}
-
-/**
- * Dossier lu par l'importeur mais laissé sans carrefour : plusieurs carrefours du réseau lui
- * correspondent aussi bien, ou aucun (§14.3). L'égalité peut être réelle — OpenStreetMap découpe
- * parfois un carrefour en deux nœuds voisins portant chacun une partie des voies — et aucune
- * heuristique ne la tranchera : seul l'exploitant le peut, via `rattacherDossier`.
- *
- * Vit dans l'état d'interface : ni dans le projet, ni dans l'historique, ni dans la sauvegarde.
- */
-export interface DossierNonRattache {
-  /** Identifiant du dossier (VE006, « Place de l'Europe »…). */
-  dossierId: string
-  nom: string
-  /**
-   * Voies du dossier telles qu'il les écrit en entête (« Avenue de la Libération (D1082) »), à défaut
-   * celles de ses groupes : ce sont les rues que l'exploitant reconnaîtra sur le terrain.
-   */
-  voies: string[]
-  /** Pourquoi l'importeur n'a pas tranché, en français. */
-  raison: string
-  /** Carrefours du réseau qui correspondent aussi bien ; vide si aucun ne porte ces voies. */
-  candidats: CarrefourCandidat[]
-  /**
-   * Contenu brut du dossier, tel qu'il figure dans le fichier importé. `rattacherDossier` le repasse
-   * à l'importeur plutôt que de refaire la conversion : les groupes, les phases, les plans, le
-   * calendrier et les inter-verts n'ont qu'une seule implémentation (src/geo/dossierFeux.ts).
-   */
-  brut: unknown
-}
-
-/**
  * Invariants du store :
- *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover`, `ui.toolNodes`,
- *    `ui.planApercu` et les candidats de `dossiersNonRattaches` sont purgés des identifiants qui n'existent
- *    plus ; l'historique est vidé au chargement d'un projet ;
+ *  - après toute action annulable, undo/redo et chargement compris, `selection`, `hover`, `ui.toolNodes`
+ *    et `ui.planApercu` sont purgés des identifiants qui n'existent plus, et `ui.itineraires` est marqué
+ *    périmé dès que le réseau change ; l'historique est vidé au chargement d'un projet ;
  *  - `sim.frame` et `sim.results` (messages `frame`/`stats`) sont écrits hors immer et ne déclenchent ni `dirty` ni autosauvegarde ;
  *    `project.lastResults` n'est écrit qu'à `done` ;
  *  - toute modification de topologie appelle `reconcileDemand` puis `sanitizeNetwork` et marque `sim.stale`.
@@ -172,14 +158,12 @@ export interface AppState {
   /** Modifications non enregistrées dans la bibliothèque. */
   dirty: boolean
   /**
-   * Bilan du dernier import de dossiers de carrefour, `null` tant qu'aucun n'a été fait.
+   * Bilan du dernier dossier de carrefour importé, `null` tant qu'aucun ne l'a été.
    *
    * Il vit dans le store et non dans le panneau : changer d'onglet démonte le panneau Feux, et un bilan
    * perdu au premier coup d'œil sur la carte obligerait à réimporter le fichier pour le relire.
    */
-  dossiersRapport: DossierImportReport | null
-  /** Dossiers importés qu'aucun carrefour ne revendique seul, en attente d'un rattachement manuel (§14.3). */
-  dossiersNonRattaches: DossierNonRattache[]
+  dossierRapport: DossierImportReport | null
 
   /* --------- Projet --------- */
   /**
@@ -246,23 +230,31 @@ export interface AppState {
   setControllerNodes(controllerId: ControllerId, nodeIds: NodeId[]): void
   /** Calcule les décalages des contrôleurs le long du plus court chemin entre deux nœuds (onde verte). */
   applyGreenWave(fromNode: NodeId, toNode: NodeId): { controllers: number; path: NodeId[] }
+
+  /* --------- Itinéraires (lecture seule : ni projet, ni historique) --------- */
   /**
-   * Import d'un fichier de dossiers de carrefour (§14) : les contrôleurs et les régulations reconnus
-   * remplacent ceux du réseau, dossier par dossier. Annulable ; renvoie le bilan à afficher.
-   * Le bilan et les dossiers non rattachés restent lisibles ensuite dans `dossiersRapport` et
-   * `dossiersNonRattaches`.
+   * Calcule les cinq itinéraires les plus courts de `fromNode` à `toNode` sur le réseau courant et les
+   * publie dans `ui.itineraires` pour la carte et le panneau Réseau. Les temps tiennent compte du retard
+   * des carrefours traversés, comme le routage du moteur (§5.5). Signale une erreur et publie une liste
+   * vide si aucun chemin ne relie les deux nœuds.
    */
-  importDossiersFeux(text: string): DossierImportReport
+  calculerItineraires(fromNode: NodeId, toNode: NodeId): void
+  /** Relance le calcul sur le réseau courant (après une modification qui l'a rendu périmé). */
+  recalculerItineraires(): void
+  /** Retire les itinéraires de la carte et du panneau. */
+  effacerItineraires(): void
+  /** Met un itinéraire en avant (survol de la liste) ; `-1` les remet tous au même plan. */
+  setItineraireActif(rang: number): void
   /**
-   * Rattache à la main un dossier de `dossiersNonRattaches` au carrefour `nodeId` : le contrôleur du
-   * dossier (groupes rattachés aux mouvements de ce carrefour, phases, plans, calendrier, matrice
-   * d'inter-verts) remplace le plan du nœud, dont la régulation passe en « signals ». Annulable.
+   * Applique au carrefour à feux `controllerId` le dossier de carrefour porté par `contenu` (le texte du
+   * fichier choisi par l'exploitant, §14). Groupes, phases, plans horaires, calendrier et matrice
+   * d'inter-verts remplacent le plan en place ; le contrôleur garde son identifiant et ses nœuds.
+   * Annulable ; renvoie le bilan, qui reste lisible ensuite dans `dossierRapport`.
    *
-   * Sans effet, avec un message d'erreur, si le dossier n'est plus en attente, si le nœud n'existe pas
-   * ou si le dossier ne décrit rien d'applicable à ce carrefour. Le dossier appliqué sort de la liste
-   * d'attente et son contrôleur devient la sélection.
+   * Sans effet, avec un bilan qui l'explique, si le fichier ne porte pas exactement un dossier ou si le
+   * carrefour n'est plus à feux. L'exploitant désigne lui-même le carrefour : rien n'est deviné.
    */
-  rattacherDossier(dossierId: string, nodeId: NodeId): void
+  importDossierFeux(controllerId: ControllerId, contenu: string): DossierImportReport
   /**
    * Impose un plan de feux à un contrôleur, pour l'affichage **et** pour la simulation ; `null` rend la
    * main au calendrier horaire. Réglage d'étude : il vit dans `ui.planApercu`, jamais dans le projet.

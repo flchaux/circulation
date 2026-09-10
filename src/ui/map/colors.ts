@@ -69,6 +69,21 @@ export const HOVER_COLOR = '#4a94e8'
 export const DROP_TARGET_COLOR = '#e0522a'
 export const TOOL_COLOR = '#12a150'
 
+/**
+ * Couleurs des itinéraires comparés, du plus rapide au plus lent (outil « itinéraires »).
+ *
+ * Cinq teintes franchement séparées, et non une rampe du meilleur au pire : les itinéraires se recouvrent
+ * sur une bonne part de leur longueur, et c'est justement là où ils divergent qu'il faut pouvoir dire d'un
+ * coup d'œil lequel est lequel. Aucune n'est celle de la sélection (bleu) ni celle des outils (vert), qui
+ * peuvent être affichées en même temps.
+ */
+export const ITINERAIRE_COLORS = ['#d1495b', '#1b6ca8', '#e08b1e', '#6b3fa0', '#0f8f6f']
+
+/** Couleur d'un itinéraire de rang `i` (0 = le plus rapide) ; les rangs au-delà reprennent la série. */
+export function itineraireColor(rang: number): string {
+  return ITINERAIRE_COLORS[((rang % ITINERAIRE_COLORS.length) + ITINERAIRE_COLORS.length) % ITINERAIRE_COLORS.length]
+}
+
 /* ------------------------------------------------------------------ */
 /*  Rampes                                                             */
 /* ------------------------------------------------------------------ */

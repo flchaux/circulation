@@ -16,13 +16,15 @@ import type { ControllerId, EdgeId, NetEdge, Network, NodeId, SimResults } from 
 import { highwayRank, parseMovementKey } from '@/model/types'
 import { buildAdjacency } from '@/model/geometry'
 import { controllerApproaches } from '@/model/signals'
-import type { ColorMode, DragState, MapTool, Selection } from '@/state/storeTypes'
+import type { ApercuItineraires, ColorMode, DragState, MapTool, Selection } from '@/state/storeTypes'
+import type { Itineraire } from '@/engine/itineraires'
 import type { ControllerState, Frame } from '@/engine/protocol'
 import { VEHICLE_STRIDE } from '@/engine/protocol'
 import {
   CLOSED_COLOR, DROP_TARGET_COLOR, HOVER_COLOR, SELECTION_COLOR, TOOL_COLOR,
-  type ColorScale, edgeColor, edgeValue, formatValue, scaleFor,
+  type ColorScale, edgeColor, edgeValue, formatValue, itineraireColor, scaleFor,
 } from './colors'
+import { formatDureeTrajet } from '@/ui/strings'
 
 /* ------------------------------------------------------------------ */
 /*  Constantes d'affichage                                             */
@@ -54,11 +56,35 @@ const COLOR_NODE = '#42505f'
 const COLOR_NODE_FILL = '#ffffff'
 const COLOR_LABEL = '#1f2933'
 const COLOR_LABEL_HALO = 'rgba(255,255,255,0.9)'
+const COLOR_LABEL_BG = 'rgba(255,255,255,0.85)'
 const COLOR_HATCH = '#b3261e'
 const SIGNAL_COLORS = { green: '#11a53a', amber: '#f0a020', red: '#d92020', off: '#6b7280' }
 
 const FONT_LABEL = '500 11px system-ui, "Segoe UI", Roboto, sans-serif'
 const FONT_VALUE = '600 11px system-ui, "Segoe UI", Roboto, sans-serif'
+const FONT_ITINERAIRE = '700 12px system-ui, "Segoe UI", Roboto, sans-serif'
+
+/** Largeur du ruban d'un itinéraire comparé (px). */
+const ITINERAIRE_WIDTH_PX = 7
+/**
+ * Écart latéral entre deux rubans (px). Les itinéraires les plus courts d'un point à un autre partagent
+ * presque toujours l'essentiel de leur tracé : sans cet écartement, on ne verrait que le premier, et
+ * l'outil ne montrerait pas ce qu'on lui demande — où et de combien les autres s'en écartent.
+ */
+const ITINERAIRE_SPACING_PX = 3.5
+/** Hauteur de l'étiquette de temps d'un itinéraire (px). */
+const ITINERAIRE_LABEL_H = 18
+
+/** Hauteur d'une ligne de valeur dans une étiquette (px). */
+const VALUE_ROW_PX = 15
+/** Hauteur approximative d'un nom de rue, pour son encombrement (px). */
+const NAME_HEIGHT_PX = 12
+/** Largeur réservée à la flèche de sens devant une valeur (px). */
+const ARROW_SLOT_PX = 13
+/** Côté d'une cellule de la grille d'occupation des étiquettes (px). */
+const LABEL_CELL_PX = 16
+/** Marge conservée autour d'une étiquette dans la grille d'occupation (px) : aère les axes bien fournis. */
+const LABEL_MARGIN_PX = 7
 
 /* ------------------------------------------------------------------ */
 /*  Géométrie projetée                                                 */
@@ -317,6 +343,11 @@ export interface MapScene {
   showLabels: boolean
   showVehicles: boolean
   tool: MapTool
+  /**
+   * Itinéraires comparés à surligner (outil « itinéraires »), `null` si aucun ou s'ils sont périmés :
+   * c'est `MapView` qui tranche, le renderer dessine ce qu'on lui donne.
+   */
+  itineraires: ApercuItineraires | null
   toolNodes: NodeId[]
   /** Chemin prévisualisé par l'outil en cours (onde verte / ajout de tronçon). */
   toolPath: NodeId[]
@@ -341,6 +372,71 @@ interface NetworkIndex {
   nodePx: Float64Array
   nodeAt: Map<NodeId, number>
   controllers: Map<ControllerId, ApproachDot[]>
+}
+
+/** Point d'accroche d'une étiquette : milieu du tronçon (coordonnées canvas), sens et largeur du trait. */
+interface LabelAnchor {
+  x: number
+  y: number
+  dx: number
+  dy: number
+  width: number
+}
+
+/** Une ligne d'étiquette de valeur : le sens (`dx`/`dy` nuls = pas de flèche) et la couleur de l'échelle. */
+interface LabelRow {
+  text: string
+  color: string
+  dx: number
+  dy: number
+}
+
+/**
+ * Grille d'occupation des étiquettes : chaque étiquette réserve toutes les cellules de son rectangle,
+ * ce qui interdit les chevauchements quelles que soient sa taille et sa position.
+ */
+class LabelGrid {
+  private readonly used = new Set<number>()
+
+  /** Réserve le rectangle centré en (`x`, `y`) s'il est libre ; sinon renvoie `false` sans rien réserver. */
+  place(x: number, y: number, w: number, h: number): boolean {
+    const c0 = Math.floor((x - w / 2 - LABEL_MARGIN_PX) / LABEL_CELL_PX)
+    const c1 = Math.floor((x + w / 2 + LABEL_MARGIN_PX) / LABEL_CELL_PX)
+    const r0 = Math.floor((y - h / 2 - LABEL_MARGIN_PX) / LABEL_CELL_PX)
+    const r1 = Math.floor((y + h / 2 + LABEL_MARGIN_PX) / LABEL_CELL_PX)
+    for (let c = c0; c <= c1; c++) {
+      for (let r = r0; r <= r1; r++) if (this.used.has(cellKey(c, r))) return false
+    }
+    for (let c = c0; c <= c1; c++) {
+      for (let r = r0; r <= r1; r++) this.used.add(cellKey(c, r))
+    }
+    return true
+  }
+}
+
+/** Rectangle à coins arrondis (les navigateurs ciblés ont `roundRect`, mais pas jsdom). */
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const rayon = Math.min(r, w / 2, h / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + rayon, y)
+  ctx.arcTo(x + w, y, x + w, y + h, rayon)
+  ctx.arcTo(x + w, y + h, x, y + h, rayon)
+  ctx.arcTo(x, y + h, x, y, rayon)
+  ctx.arcTo(x, y, x + w, y, rayon)
+  ctx.closePath()
+}
+
+function cellKey(col: number, row: number): number {
+  return (col + 4096) * 16384 + (row + 4096)
+}
+
+/**
+ * Ordonne les deux sens d'un tronçon : celui qui va vers la droite de l'écran (ou vers le haut,
+ * pour une rue verticale) est écrit en premier, pour que la lecture suive le tracé.
+ */
+export function firstHeading(a: PointOnEdge, b: PointOnEdge): boolean {
+  if (Math.abs(a.dx - b.dx) > 1e-6) return a.dx > b.dx
+  return a.dy < b.dy
 }
 
 /* ------------------------------------------------------------------ */
@@ -496,7 +592,10 @@ export class MapRenderer {
     // 5. Étiquettes.
     if (scene.showLabels && zoom >= LABEL_ZOOM) this.drawLabels(ctx, scene, visible, scale)
 
-    // 6. Glisser en cours : nœud déplacé et cible de fusion.
+    // 6. Itinéraires comparés, par-dessus les étiquettes : c'est la réponse à une question posée.
+    this.drawItineraires(ctx, scene)
+
+    // 7. Glisser en cours : nœud déplacé et cible de fusion.
     if (scene.drag) this.drawDrag(ctx, scene, index, scene.drag)
   }
 
@@ -708,8 +807,15 @@ export class MapRenderer {
   }
 
   /**
-   * Étiquettes : nom de rue le long du tronçon et valeur du mode de couleur.
-   * Une grille d'occupation évite les chevauchements et un nom n'est écrit qu'une fois par redessin.
+   * Étiquettes : valeur du mode de couleur, puis nom de rue le long du tronçon.
+   *
+   * Les deux sens d'un tronçon à double sens portent chacun leur valeur au même endroit : ils sont réunis
+   * dans une **seule** étiquette à deux lignes, chaque ligne précédée d'une flèche orientée dans le sens de
+   * circulation qu'elle chiffre. Sans cela, l'une des deux valeurs éliminait l'autre de la grille
+   * d'occupation, et laquelle dépendait du zoom.
+   *
+   * Une grille d'occupation par rectangle évite les chevauchements. Les valeurs sont posées avant les noms,
+   * qui ne sont qu'un repli : un nom ne prend jamais la place d'un chiffre. Un nom n'est écrit qu'une fois.
    */
   private drawLabels(
     ctx: CanvasRenderingContext2D,
@@ -717,57 +823,301 @@ export class MapRenderer {
     edges: NetEdge[],
     scale: ColorScale,
   ): void {
-    const { originX, originY } = this.view
-    const used = new Set<number>()
-    const names = new Set<string>()
-    const cell = 44
-    const occupy = (x: number, y: number): boolean => {
-      const key = ((x / cell) | 0) * 4096 + ((y / cell) | 0)
-      if (used.has(key)) return false
-      used.add(key)
-      return true
-    }
+    const grid = new LabelGrid()
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.lineJoin = 'round'
-    for (let i = edges.length - 1; i >= 0; i--) {
-      const edge = edges[i]
-      const cache = this.cacheFor(edge, scene.drag)
-      if (cache.length < 45) continue
-      const value = edgeValue(scene.colorMode, edge, scene.results, scene.reference)
-      const p = pointAtPx(cache, cache.length / 2, this.point)
-      const x = p.x - originX
-      const y = p.y - originY
-      if (x < 0 || y < 0 || x > this.view.width || y > this.view.height) continue
-      if (value !== null) {
-        if (!occupy(x, y)) continue
-        ctx.font = FONT_VALUE
-        const text = formatValue(scene.colorMode, value)
-        const w = ctx.measureText(text).width
-        ctx.fillStyle = 'rgba(255,255,255,0.85)'
-        ctx.fillRect(x - w / 2 - 3, y - 8, w + 6, 15)
-        ctx.fillStyle = scale.color(value)
-        ctx.fillRect(x - w / 2 - 3, y + 6, w + 6, 2)
-        ctx.fillStyle = COLOR_LABEL
-        ctx.fillText(text, x, y)
-        continue
+    // Les tronçons sont triés par importance croissante : parcourus à l'envers, les axes principaux
+    // choisissent leur emplacement les premiers.
+    const visible = new Set<EdgeId>(edges.map((edge) => edge.id))
+    const chiffres = new Set<EdgeId>()
+    for (let i = edges.length - 1; i >= 0; i--) this.drawEdgeValue(ctx, scene, grid, edges[i], scale, visible, chiffres)
+    const noms = new Set<string>()
+    for (let i = edges.length - 1; i >= 0; i--) this.drawEdgeName(ctx, scene, grid, edges[i], noms)
+  }
+
+  /** Étiquette chiffrée d'un tronçon, réunie avec celle du sens inverse quand les deux ont une valeur. */
+  private drawEdgeValue(
+    ctx: CanvasRenderingContext2D,
+    scene: MapScene,
+    grid: LabelGrid,
+    edge: NetEdge,
+    scale: ColorScale,
+    visible: Set<EdgeId>,
+    done: Set<EdgeId>,
+  ): void {
+    if (done.has(edge.id)) return
+    const anchor = this.labelAnchor(scene, edge)
+    if (!anchor) return
+    const value = edgeValue(scene.colorMode, edge, scene.results, scene.reference)
+    if (value === null) return
+    done.add(edge.id)
+
+    const reverse = edge.reverseOf ? scene.network.edges[edge.reverseOf] : undefined
+    // Sur un double sens, la flèche dit lequel des deux sens porte la valeur, même si l'autre n'en a pas.
+    const rows: LabelRow[] = [{
+      text: formatValue(scene.colorMode, value),
+      color: scale.color(value),
+      dx: reverse ? anchor.dx : 0,
+      dy: reverse ? anchor.dy : 0,
+    }]
+    let { x, y } = anchor
+    const back = reverse && visible.has(reverse.id) ? this.labelAnchor(scene, reverse) : null
+    const other = reverse && back ? edgeValue(scene.colorMode, reverse, scene.results, scene.reference) : null
+    if (reverse && back && other !== null) {
+      // Les deux chaussées sont décalées de part et d'autre de l'axe : l'étiquette se pose entre elles.
+      x = (x + back.x) / 2
+      y = (y + back.y) / 2
+      const row: LabelRow = { text: formatValue(scene.colorMode, other), color: scale.color(other), dx: back.dx, dy: back.dy }
+      if (firstHeading(back, anchor)) rows.unshift(row)
+      else rows.push(row)
+      done.add(reverse.id)
+    }
+    this.drawValueLabel(ctx, grid, x, y, rows)
+  }
+
+  /** Nom de rue écrit le long du tronçon, une seule fois par redessin et par nom. */
+  private drawEdgeName(
+    ctx: CanvasRenderingContext2D,
+    scene: MapScene,
+    grid: LabelGrid,
+    edge: NetEdge,
+    done: Set<string>,
+  ): void {
+    if (!edge.name || done.has(edge.name)) return
+    const anchor = this.labelAnchor(scene, edge)
+    if (!anchor) return
+    ctx.font = FONT_LABEL
+    // Texte orienté le long de la voie, toujours lisible de gauche à droite.
+    let angle = Math.atan2(anchor.dy, anchor.dx)
+    if (angle > Math.PI / 2 || angle < -Math.PI / 2) angle += Math.PI
+    const textWidth = ctx.measureText(edge.name).width
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    // Le texte est écrit à (0, -offset) dans le repère tourné : encombrement redressé pour la grille.
+    const offset = anchor.width / 2 + 7
+    const placed = grid.place(
+      anchor.x + offset * sin,
+      anchor.y - offset * cos,
+      Math.abs(textWidth * cos) + Math.abs(NAME_HEIGHT_PX * sin),
+      Math.abs(textWidth * sin) + Math.abs(NAME_HEIGHT_PX * cos),
+    )
+    if (!placed) return
+    done.add(edge.name)
+    ctx.save()
+    ctx.translate(anchor.x, anchor.y)
+    ctx.rotate(angle)
+    ctx.lineWidth = 3
+    ctx.strokeStyle = COLOR_LABEL_HALO
+    ctx.strokeText(edge.name, 0, -offset)
+    ctx.fillStyle = COLOR_LABEL
+    ctx.fillText(edge.name, 0, -offset)
+    ctx.restore()
+  }
+
+  /**
+   * Milieu d'un tronçon en coordonnées du canvas, avec son sens de circulation et sa largeur de trait,
+   * ou `null` s'il est trop court pour être étiqueté ou hors du canvas.
+   */
+  private labelAnchor(scene: MapScene, edge: NetEdge): LabelAnchor | null {
+    const cache = this.cacheFor(edge, scene.drag)
+    if (cache.length < 45) return null
+    const p = pointAtPx(cache, cache.length / 2, this.point)
+    const x = p.x - this.view.originX
+    const y = p.y - this.view.originY
+    if (x < 0 || y < 0 || x > this.view.width || y > this.view.height) return null
+    return { x, y, dx: p.dx, dy: p.dy, width: cache.width }
+  }
+
+  /**
+   * Étiquette de valeur centrée en (`x`, `y`) : une ligne par sens, sur un fond blanc commun.
+   * Sans flèche (sens unique), la couleur de l'échelle est rappelée par le trait sous le chiffre ;
+   * avec flèches, c'est la flèche de chaque ligne qui la porte.
+   */
+  private drawValueLabel(
+    ctx: CanvasRenderingContext2D,
+    grid: LabelGrid,
+    x: number,
+    y: number,
+    rows: LabelRow[],
+  ): void {
+    ctx.font = FONT_VALUE
+    const arrows = rows.some((row) => row.dx !== 0 || row.dy !== 0)
+    let textWidth = 0
+    for (const row of rows) textWidth = Math.max(textWidth, ctx.measureText(row.text).width)
+    const boxWidth = textWidth + (arrows ? ARROW_SLOT_PX : 0) + 6
+    const boxHeight = rows.length * VALUE_ROW_PX + (arrows ? 0 : 2)
+    if (!grid.place(x, y, boxWidth, boxHeight)) return
+    const top = y - boxHeight / 2
+    ctx.fillStyle = COLOR_LABEL_BG
+    ctx.fillRect(x - boxWidth / 2, top, boxWidth, boxHeight)
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      const cy = top + VALUE_ROW_PX * (i + 0.5)
+      if (row.dx !== 0 || row.dy !== 0) {
+        this.drawHeadingArrow(ctx, x - boxWidth / 2 + 3 + ARROW_SLOT_PX / 2, cy, row.dx, row.dy, row.color)
+      } else {
+        const w = ctx.measureText(row.text).width
+        ctx.fillStyle = row.color
+        ctx.fillRect(x - w / 2 - 3, cy + 7, w + 6, 2)
       }
-      if (!edge.name || names.has(edge.name)) continue
-      if (!occupy(x, y)) continue
-      names.add(edge.name)
-      ctx.font = FONT_LABEL
-      // Texte orienté le long de la voie, toujours lisible de gauche à droite.
-      let angle = Math.atan2(p.dy, p.dx)
-      if (angle > Math.PI / 2 || angle < -Math.PI / 2) angle += Math.PI
-      ctx.save()
-      ctx.translate(x, y)
-      ctx.rotate(angle)
-      ctx.lineWidth = 3
-      ctx.strokeStyle = COLOR_LABEL_HALO
-      ctx.strokeText(edge.name, 0, -cache.width / 2 - 7)
       ctx.fillStyle = COLOR_LABEL
-      ctx.fillText(edge.name, 0, -cache.width / 2 - 7)
+      ctx.fillText(row.text, x + (arrows ? ARROW_SLOT_PX / 2 : 0), cy)
+    }
+  }
+
+  /** Flèche du sens de circulation devant une valeur, à la couleur de l'échelle. */
+  private drawHeadingArrow(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    dx: number,
+    dy: number,
+    color: string,
+  ): void {
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.rotate(Math.atan2(dy, dx))
+    ctx.beginPath()
+    ctx.moveTo(5, 0)
+    ctx.lineTo(-5, -3.4)
+    ctx.lineTo(-2, 0)
+    ctx.lineTo(-5, 3.4)
+    ctx.closePath()
+    ctx.fillStyle = color
+    ctx.fill()
+    // Contour discret : les couleurs claires de l'échelle resteraient sinon invisibles sur le fond blanc.
+    ctx.lineWidth = 0.6
+    ctx.strokeStyle = 'rgba(31,41,51,0.35)'
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  /* ---------------- itinéraires comparés ---------------- */
+
+  /**
+   * Rubans des itinéraires comparés, puis leur temps de parcours en étiquette.
+   *
+   * Les rubans sont tracés du plus lent au plus rapide pour que le meilleur reste au-dessus, et écartés
+   * latéralement d'un rang à l'autre : là où deux itinéraires se confondent, on lit une bande rayée aux
+   * couleurs de chacun, et là où ils divergent, chaque ruban part de son côté. Un itinéraire mis en avant
+   * (survol de la liste du panneau) passe devant, les autres s'estompent.
+   */
+  private drawItineraires(ctx: CanvasRenderingContext2D, scene: MapScene): void {
+    const apercu = scene.itineraires
+    if (!apercu || !apercu.chemins.length) return
+    const actif = apercu.actif
+    for (let rang = apercu.chemins.length - 1; rang >= 0; rang--) {
+      if (rang === actif) continue
+      this.strokeItineraire(ctx, scene, apercu.chemins[rang], rang, actif < 0 ? 0.72 : 0.22)
+    }
+    if (actif >= 0 && actif < apercu.chemins.length) {
+      this.strokeItineraire(ctx, scene, apercu.chemins[actif], actif, 0.92)
+    }
+    // Étiquettes après tous les rubans : aucune n'est recouverte par un tracé.
+    const grid = new LabelGrid()
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const ordre = actif >= 0 ? [actif, ...apercu.chemins.map((_, i) => i).filter((i) => i !== actif)] : apercu.chemins.map((_, i) => i)
+    for (const rang of ordre) {
+      this.drawItineraireLabel(ctx, scene, apercu, rang, grid, actif < 0 || rang === actif ? 1 : 0.35)
+    }
+  }
+
+  /** Écart latéral du ruban d'un rang : le plus rapide sur l'axe, les suivants de part et d'autre. */
+  private itineraireOffset(rang: number): number {
+    return ITINERAIRE_SPACING_PX * Math.ceil(rang / 2) * (rang % 2 === 1 ? 1 : -1)
+  }
+
+  private strokeItineraire(
+    ctx: CanvasRenderingContext2D,
+    scene: MapScene,
+    chemin: Itineraire,
+    rang: number,
+    alpha: number,
+  ): void {
+    const { originX, originY } = this.view
+    const decalage = this.itineraireOffset(rang)
+    ctx.save()
+    ctx.globalAlpha = alpha
+    ctx.strokeStyle = itineraireColor(rang)
+    ctx.lineWidth = ITINERAIRE_WIDTH_PX
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    for (const id of chemin.edges) {
+      const edge = scene.network.edges[id]
+      if (!edge) continue
+      const cache = this.cacheFor(edge, scene.drag)
+      if (!this.inView(cache)) continue
+      const pts = decalage === 0 ? cache.pts : offsetPolyline(cache.pts, cache.count, decalage)
+      ctx.beginPath()
+      ctx.moveTo(pts[0] - originX, pts[1] - originY)
+      for (let i = 1; i < cache.count; i++) ctx.lineTo(pts[2 * i] - originX, pts[2 * i + 1] - originY)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+
+  /**
+   * Temps de parcours d'un itinéraire, écrit sur un tronçon qui n'appartient qu'à lui.
+   *
+   * Poser l'étiquette au milieu du trajet la mettrait sur la partie commune à tous, cinq fois au même
+   * endroit. Elle est donc placée sur la portion propre à l'itinéraire — celle qui justifie qu'il figure
+   * dans la liste — et à défaut sur son milieu.
+   */
+  private drawItineraireLabel(
+    ctx: CanvasRenderingContext2D,
+    scene: MapScene,
+    apercu: ApercuItineraires,
+    rang: number,
+    grid: LabelGrid,
+    alpha: number,
+  ): void {
+    const chemin = apercu.chemins[rang]
+    const propres = new Set(chemin.edges)
+    for (let autre = 0; autre < apercu.chemins.length; autre++) {
+      if (autre === rang) continue
+      for (const id of apercu.chemins[autre].edges) propres.delete(id)
+    }
+    // Candidats du plus central au plus excentré : au milieu de la portion propre, sinon au milieu du trajet.
+    const source = propres.size ? chemin.edges.filter((id) => propres.has(id)) : chemin.edges
+    const milieu = (source.length - 1) / 2
+    const candidats = source
+      .map((id, i) => ({ id, ecart: Math.abs(i - milieu) }))
+      .sort((a, b) => a.ecart - b.ecart)
+      .slice(0, 12)
+
+    ctx.font = FONT_ITINERAIRE
+    const texte = `${rang + 1} · ${formatDureeTrajet(chemin.time)}`
+    const largeur = ctx.measureText(texte).width + 16
+    const decalage = this.itineraireOffset(rang)
+    for (let essai = 0; essai < candidats.length; essai++) {
+      const edge = scene.network.edges[candidats[essai].id]
+      if (!edge) continue
+      const cache = this.cacheFor(edge, scene.drag)
+      const pts = decalage === 0 ? cache.pts : offsetPolyline(cache.pts, cache.count, decalage)
+      // Les longueurs cumulées du cache valent pour la polyligne non écartée ; à quelques pixels d'écart,
+      // le milieu reste le milieu — l'étiquette n'a pas à être placée au centimètre près.
+      const p = pointAtPx({ ...cache, pts }, cache.length / 2, this.point)
+      const x = p.x - this.view.originX
+      const y = p.y - this.view.originY
+      if (x < 0 || y < 0 || x > this.view.width || y > this.view.height) continue
+      // Le dernier candidat est écrit même si la place est prise : mieux vaut deux étiquettes voisines
+      // qu'un itinéraire dont on ne lit nulle part le temps.
+      const dernier = essai === candidats.length - 1
+      if (!grid.place(x, y, largeur, ITINERAIRE_LABEL_H) && !dernier) continue
+      ctx.save()
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = itineraireColor(rang)
+      roundRect(ctx, x - largeur / 2, y - ITINERAIRE_LABEL_H / 2, largeur, ITINERAIRE_LABEL_H, 5)
+      ctx.fill()
+      ctx.lineWidth = 1.2
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+      ctx.stroke()
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(texte, x, y + 0.5)
       ctx.restore()
+      return
     }
   }
 

@@ -1,0 +1,526 @@
+{
+  "commune": "Veauche (Loire, 42340)",
+  "objet": "Dossiers de carrefour des feux tricolores",
+  "date_extraction": "2026-09-07",
+  "glossaire": {
+    "Vn": "groupe de feux véhicules n",
+    "Pn": "groupe de feux piétons n",
+    "Bxx / Bx.y": "boucle de détection (magnétique) dans la chaussée",
+    "RADn / Radn": "radar de détection",
+    "BPPn": "bouton poussoir piéton du groupe n",
+    "sn": "signal (feu) numéro n sur le plan",
+    "IV": "intervalle véhicule (temps de prolongation du vert après le dernier passage détecté)",
+    "escam / escamotable": "phase qui n'apparaît que sur appel d'un détecteur",
+    "rappel": "phase ou groupe ouvert à chaque cycle sans appel",
+    "repos": "phase dans laquelle le contrôleur attend quand il n'y a pas d'appel",
+    "PR": "point de repos",
+    "inter-vert": "temps entre la fin du vert d'un groupe et le début du vert d'un groupe incompatible",
+    "rouge de dégagement": "temps de rouge après le jaune, pour vider le carrefour",
+    "HPM / HPS / HC": "heures de pointe du matin / du soir / heures creuses",
+    "BTS / BTL": "base de temps synchronisée / locale (coordination entre carrefours)",
+    "eJCM / eRBM": "entrées contrôleur : jaune clignotant manuel / rouge bloqué manuel",
+    "PDL": "point de livraison électrique",
+    "DIASER": "variables d'échange avec un poste central (sans objet ici)"
+  },
+  "id": "VE001",
+  "nom": "Avenue du Général de Gaulle / Croix des Pères",
+  "fichier_source": "VE001C-Av_de_Gaulle_Croix_des_Peres__1_.pdf",
+  "fichier_origine": "VE001-Av_de_Gaulle_Croix_des_Peres.xlsm",
+  "nom_dossier_archivage": "VE001C_Av.Général de Gaulle / Croix des Pères dossier",
+  "modele_dossier": "Mairie de Veauche (nouveau modèle xlsm)",
+  "voies": [
+    "Avenue du Général de Gaulle (D1082)",
+    "Rue de la Croix des Pères",
+    "Rue Pierre de Ronsard"
+  ],
+  "identification": {
+    "numero_carrefour": "VE001",
+    "controleur": "FARECO - GALLERY-S",
+    "mise_en_service_dernier_controleur": "2026-02-10",
+    "version_logicielle": null,
+    "version_logicielle_note": "Champ non renseigné (surligné en jaune)",
+    "poste_de_mesures": 0,
+    "mode_fonctionnement": {
+      "cyclique": true,
+      "BTS": false,
+      "onde_verte": false,
+      "prio_TC": false,
+      "escamotage": false,
+      "repos_rouge_nuit": false,
+      "repos_autre": true,
+      "action_locale_particuliere": false
+    },
+    "module_coordination": {
+      "MC98": false,
+      "MC3": false,
+      "4G": false
+    },
+    "coordination_avec_carrefours": null,
+    "nombre_plans_de_feux": 1,
+    "nombre_phases_trafic": 2
+  },
+  "derniere_modification": {
+    "indice": "C",
+    "date": "2026-02-10",
+    "redacteur": "0",
+    "relecteur": "0",
+    "objet": "Remplacement controleur"
+  },
+  "historique_modifications": [
+    {
+      "indice": "A",
+      "date": "2007-08-12",
+      "objet": "CREATION DOSSIER",
+      "elements_mis_a_jour": [
+        "Localisation",
+        "Plan",
+        "Matrice",
+        "Calendrier",
+        "Diag bulles",
+        "Diag linéaire",
+        "Coord",
+        "Prio VTC",
+        "Racco",
+        "PAM",
+        "DIASER",
+        "Alim",
+        "Matériel"
+      ]
+    },
+    {
+      "indice": "B",
+      "date": "2011-12-15",
+      "objet": "Pose radar LF1 et 4",
+      "elements_mis_a_jour": [
+        "Plan",
+        "Racco",
+        "Matériel"
+      ]
+    },
+    {
+      "indice": "C",
+      "date": "2026-02-10",
+      "objet": "Remplacement controleur",
+      "elements_mis_a_jour": [
+        "Plan",
+        "Matrice",
+        "Diag bulles",
+        "Diag linéaire",
+        "Racco",
+        "Matériel"
+      ]
+    }
+  ],
+  "inventaire_materiel": {
+    "armoire": {
+      "carte_puissance": 3,
+      "cartes_entree_sortie": 1,
+      "carte_cpu": 1,
+      "nb_lignes_utilisees_installees": null,
+      "alimentation_detecteur": 1,
+      "detecteurs_omnidirectionnels": 4,
+      "radar": 2,
+      "detecteur_selectif_tram": 0,
+      "detecteur_selectif_bus": 0,
+      "detecteur_unidirectionnel": 0,
+      "detecteur_presence": 0,
+      "signal_aide_a_la_conduite": 0
+    },
+    "visualisation": {
+      "nombre_boucles": 4,
+      "nombre_poteaux": 5,
+      "nombre_potences": 1,
+      "lanternes_diam_200": 4,
+      "lanternes_diam_300": 1,
+      "repetiteurs": 4,
+      "caisson_pietons": 6,
+      "bouton_poussoir": 6,
+      "caisson_priorite_pietons": 0,
+      "signal_unitaire": 0,
+      "caisson_pietons_R25": 0
+    },
+    "controleur_photo": "GARBARINI (photo de l'armoire sur la page raccordement)"
+  },
+  "groupes": [
+    {
+      "id": "V0",
+      "type": "vehicule",
+      "voie": "Rue de la Croix des Pères",
+      "detecteurs": [
+        "B0.1 (B01)",
+        "Rad 0"
+      ],
+      "signaux": [
+        "s0"
+      ]
+    },
+    {
+      "id": "P1",
+      "type": "pieton",
+      "voie": "Piéton Rue de la Croix des Pères",
+      "boutons_poussoirs": [
+        "BPP1"
+      ],
+      "signaux": [
+        "s1"
+      ]
+    },
+    {
+      "id": "V2",
+      "type": "vehicule",
+      "voie": "Av. Général de Gaulle Sud",
+      "detecteurs": [
+        "B2.1 (B21)"
+      ],
+      "signaux": [
+        "s2"
+      ]
+    },
+    {
+      "id": "V3",
+      "type": "vehicule",
+      "voie": "Rue Pierre de Ronsard",
+      "detecteurs": [
+        "B3.1 (B31)",
+        "Rad 3 (libellé Rad4 sur le plan)"
+      ],
+      "signaux": [
+        "s3"
+      ]
+    },
+    {
+      "id": "P4",
+      "type": "pieton",
+      "voie": "Piéton Rue Pierre de Ronsard",
+      "boutons_poussoirs": [
+        "BPP4"
+      ],
+      "signaux": [
+        "s4"
+      ]
+    },
+    {
+      "id": "V5",
+      "type": "vehicule",
+      "voie": "Av. Général de Gaulle Nord",
+      "detecteurs": [
+        "B5.1 (B51)"
+      ],
+      "signaux": [
+        "s5"
+      ]
+    },
+    {
+      "id": "P6",
+      "type": "pieton",
+      "voie": "Piéton Av. Général de Gaulle",
+      "boutons_poussoirs": [
+        "BPP6"
+      ],
+      "signaux": [
+        "s6"
+      ]
+    }
+  ],
+  "detecteurs": {
+    "boucles": [
+      "B0.1",
+      "B2.1",
+      "B3.1",
+      "B5.1"
+    ],
+    "type_boucles": "Détecteur omnidirectionnel",
+    "radars": [
+      "Rad 0",
+      "Rad 3"
+    ]
+  },
+  "phases": [
+    {
+      "nom": "Phase A Repos",
+      "vehicules": [
+        "V2",
+        "V5"
+      ],
+      "pietons": [
+        "P1",
+        "P4"
+      ],
+      "mini_s": 10,
+      "maxi_s": 35,
+      "regulation": "Régul par B2.1 / B5.1, intervalle véhicule 3 s"
+    },
+    {
+      "nom": "Phase B",
+      "vehicules": [
+        "V0",
+        "V3"
+      ],
+      "pietons": [
+        "P6"
+      ],
+      "mini_s": 8,
+      "maxi_s": 13,
+      "regulation": "Régul par B0.1 / B3.1 / Rad 0 / Rad 3, intervalle véhicule 3 s",
+      "appel": "B0.1 / B3.1 / Rad 0 / Rad 3 / BPP6"
+    }
+  ],
+  "plans_de_feux": [
+    {
+      "nom": "PF00",
+      "cycle_s": 67,
+      "phases": [
+        {
+          "nom": "A Repos",
+          "mini_s": 10,
+          "maxi_s": 35
+        },
+        {
+          "nom": "B",
+          "mini_s": 8,
+          "maxi_s": 13
+        }
+      ]
+    }
+  ],
+  "calendrier": {
+    "tous_les_jours_y_compris_dimanche_et_feries": [
+      {
+        "plage": "00h - 24h",
+        "plan": "PF00"
+      }
+    ]
+  },
+  "distances_itineraires_degagement_m": {
+    "convention": "Ligne = groupe qui perd le vert, colonne = groupe qui prend le vert. Distance en mètres.",
+    "valeurs": {
+      "V0": {
+        "P1": 4,
+        "V2": 18,
+        "P4": 19,
+        "V5": 18
+      },
+      "P1": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V2": {
+        "V0": 28,
+        "V3": 28,
+        "P6": 33
+      },
+      "V3": {
+        "P1": 22,
+        "V2": 25,
+        "P4": 8,
+        "V5": 21
+      },
+      "P4": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V5": {
+        "V0": 30,
+        "V3": 31,
+        "P6": 4
+      },
+      "P6": {
+        "V2": 8,
+        "V5": 8
+      }
+    }
+  },
+  "matrice_inter_verts": {
+    "convention": "Ligne = groupe qui perd le vert, colonne = groupe qui prend le vert. Valeur en secondes. Une case vide signifie que les deux groupes sont compatibles.",
+    "groupes": [
+      "V0",
+      "P1",
+      "V2",
+      "V3",
+      "P4",
+      "V5",
+      "P6"
+    ],
+    "valeurs": {
+      "V0": {
+        "P1": 6,
+        "V2": 6,
+        "P4": 6,
+        "V5": 6
+      },
+      "P1": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V2": {
+        "V0": 6,
+        "V3": 6,
+        "P6": 6
+      },
+      "V3": {
+        "P1": 6,
+        "V2": 6,
+        "P4": 6,
+        "V5": 6
+      },
+      "P4": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V5": {
+        "V0": 6,
+        "V3": 6,
+        "P6": 6
+      },
+      "P6": {
+        "V2": 8,
+        "V5": 8
+      }
+    },
+    "valeur_jaune_s": {
+      "vehicules": 3
+    },
+    "valeur_securite_s": {
+      "vehicules": 3,
+      "P1": 8,
+      "P4": 8,
+      "P6": 8
+    }
+  },
+  "matrice_rouges_degagement": {
+    "convention": "Ligne = groupe qui perd le vert, colonne = groupe qui prend le vert. Valeur en secondes. Une case vide signifie que les deux groupes sont compatibles.",
+    "valeurs": {
+      "V0": {
+        "P1": 3,
+        "V2": 3,
+        "P4": 3,
+        "V5": 3
+      },
+      "P1": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V2": {
+        "V0": 3,
+        "V3": 3,
+        "P6": 3
+      },
+      "V3": {
+        "P1": 3,
+        "V2": 3,
+        "P4": 3,
+        "V5": 3
+      },
+      "P4": {
+        "V0": 8,
+        "V3": 8
+      },
+      "V5": {
+        "V0": 3,
+        "V3": 3,
+        "P6": 3
+      },
+      "P6": {
+        "V2": 8,
+        "V5": 8
+      }
+    },
+    "vitesses_degagement_adoptees": "véhicules 10 m/s, cycles 7 m/s en l'absence de tram, 5 m/s sur les carrefours tram, piétons 1 m/s"
+  },
+  "raccordement": {
+    "module_entrees_sorties": "MODULE ENTREE 24 ENTREES / 8 SORTIES",
+    "entrees": {
+      "EX0": "B01",
+      "EX1": "B21",
+      "EX2": "B31",
+      "EX3": "B51",
+      "EX4": "Rad 0",
+      "EX5": "Rad 3",
+      "EX7": "BPP1",
+      "EX8": "BPP4",
+      "EX9": "BPP6",
+      "EX15": "eJCM"
+    },
+    "sorties": "SZ0 à SZ7 non affectées",
+    "rack_1_cartes_puissance": {
+      "0": {
+        "0": "V0",
+        "1": "P1",
+        "2": "V2"
+      },
+      "1": {
+        "3": "V3",
+        "4": "P4",
+        "5": "V5"
+      },
+      "2": {
+        "6": "P6",
+        "7": null,
+        "8": null
+      },
+      "3": {
+        "9": null,
+        "10": null,
+        "11": null
+      }
+    }
+  },
+  "malvoyants": {
+    "marque": "Phitech",
+    "version_firmware_SV": "V4,22",
+    "signal_vert": {
+      "type": "Ritournelle",
+      "message": "Ritournelle"
+    },
+    "signal_rouge": {
+      "type": "Parlé",
+      "message": "Rouge Piéton"
+    },
+    "traversees": [
+      {
+        "traversee": "P1 (libellée P0 dans le tableau)",
+        "poteaux": [
+          1,
+          2
+        ],
+        "message_rouge": "Rouge Piéton"
+      },
+      {
+        "traversee": "P4",
+        "poteaux": [
+          3,
+          4
+        ],
+        "message_rouge": "Rouge Piéton"
+      },
+      {
+        "traversee": "P6",
+        "poteaux": [
+          5,
+          6
+        ],
+        "message_rouge": "Rouge Piéton"
+      }
+    ]
+  },
+  "alimentation_electrique": {
+    "type_branchement": "Point de livraison",
+    "numero_pdl": null,
+    "adresse_pdl": null,
+    "puissance_souscrite": null,
+    "alimentation_dediee_au_carrefour": null,
+    "alimentation_multi_carrefours": null,
+    "statut": "a faire",
+    "consommation_theorique": {
+      "conso_par_heure_kW": 0,
+      "conso_par_an_kWh": 0,
+      "note": "Tableau non rempli"
+    }
+  },
+  "notes_extraction": [
+    "Dossier le plus récent : contrôleur remplacé le 10/02/2026 (FARECO GALLERY-S), version logicielle non renseignée.",
+    "Le plan d'implantation libelle Rad4 le radar de la rue Pierre de Ronsard ; le diagramme et le raccordement disent Rad 3.",
+    "La page alimentation électrique est marquée « a faire ».",
+    "Le tableau malvoyants libelle P0 la première traversée ; les groupes piétons sont P1, P4, P6."
+  ]
+}

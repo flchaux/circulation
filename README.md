@@ -28,16 +28,26 @@ npm run extract-city -- 42323 veauche   # pré-extraire une commune dans public/
    Le réseau routier est extrait d'OpenStreetMap et découpé au contour administratif de la commune.
 2. **Réseau** : déplacez les nœuds à la souris, fusionnez-les en les déposant l'un sur l'autre, modifiez le sens,
    la vitesse, le nombre de voies, fermez un tronçon, changez le type de carrefour, interdisez des mouvements.
-   Quatre outils complètent l'édition : poser un nœud d'un clic n'importe où sur la carte, relier deux nœuds par
-   un tronçon dont vous réglez la classe, les voies et la vitesse, et caler une onde verte le long d'un axe.
+   Cinq outils complètent l'édition : poser un nœud d'un clic n'importe où sur la carte, relier deux nœuds par
+   un tronçon dont vous réglez la classe, les voies et la vitesse, caler une onde verte le long d'un axe, et
+   comparer les **cinq itinéraires les plus courts** entre deux nœuds — cliquez le départ puis l'arrivée : chacun
+   est surligné d'une couleur sur la carte, avec son temps de parcours en étiquette, et le panneau les classe avec
+   leur écart au plus rapide, leur longueur et le nombre de carrefours traversés. Les temps comprennent le retard
+   des feux, des stops et des cédez-le-passage rencontrés : ce sont ceux sur lesquels le moteur choisit ses
+   itinéraires. Fermez une rue et recalculez pour voir par où le trafic passera.
 3. **Feux** : réglez les phases mouvement par mouvement, les durées de vert, l'orange, le rouge intégral, le décalage
-   entre carrefours pour créer une onde verte, ou passez un carrefour en mode adaptatif.
+   entre carrefours pour créer une onde verte, ou passez un carrefour en mode adaptatif. Une armoire qui commande
+   un carrefour décalé — deux nœuds voisins sur le fond de carte — se déclare en regroupant ces nœuds sous le
+   même contrôleur.
 4. **Feux, données réelles** : si votre commune vous a fourni ses dossiers de carrefour au format JSON
-   documenté, importez-les depuis l'onglet Feux. L'application en reprend les groupes, les phases, les plans
-   horaires, les matrices d'inter-verts et les traversées piétonnes, rattache chaque dossier au carrefour
-   correspondant du réseau, et vous dit ce qu'elle n'a pas su rattacher plutôt que de le deviner.
-5. **Trafic** : réglez les débits entrants, la matrice origine-destination, le trafic interne, ou importez un CSV
-   de comptages. Lancez la simulation depuis la barre supérieure.
+   documenté — **un fichier par carrefour** —, chargez-les feu par feu. Sélectionnez le carrefour sur la
+   carte (au besoin passez-le en feux dans l'onglet Réseau), ouvrez l'onglet Feux, puis « Importer le
+   dossier de ce carrefour ». L'application en reprend les groupes, les phases, les plans horaires, les
+   matrices d'inter-verts et les traversées piétonnes, et vous dit ce qu'elle n'a pas su rattacher — un
+   groupe de feux dont aucun mouvement du carrefour ne porte la voie — plutôt que de le deviner.
+5. **Trafic** : réglez le jour et l'heure de départ de la simulation — ils valent pour toute la commune et
+   désignent le plan de feux actif de chaque carrefour —, les débits entrants, la matrice origine-destination,
+   le trafic interne, ou importez un CSV de comptages. Lancez la simulation depuis la barre supérieure.
 6. **Résultats** : débit, retard, vitesse, files et saturation par tronçon, par sortie et par carrefour.
 7. **Comparer** : figez un scénario de référence, modifiez la signalisation, relancez, et lisez les écarts.
 

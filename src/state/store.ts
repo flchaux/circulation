@@ -23,13 +23,12 @@ import { completeSignalPlans, controllerCycle, createDefaultSignalPlan, nextCont
 import { validateProject } from '@/model/schema'
 import type { FromWorker, SimClientFactory, SimClientLike } from '@/engine/protocol'
 import { shortestPathNodes } from '@/engine/routing'
+import { NB_ITINERAIRES, itinerairesLesPlusCourts } from '@/engine/itineraires'
 import { SimClient } from '@/engine/client'
 import type { OsmExtract } from '@/geo/types'
-import type { DossierImportResult } from '@/geo/dossierFeux'
-import { candidatsPourDossier, importDossiersFeux as lireDossiersFeux } from '@/geo/dossierFeux'
+import { importDossierFeux as lireDossierFeux } from '@/geo/dossierFeux'
 import type {
-  AppState, AppStoreOptions, CarrefourCandidat, CsvImportReport, DossierImportReport, DossierNonRattache,
-  Selection, SimState, UiState,
+  AppState, AppStoreOptions, CsvImportReport, DossierImportReport, Selection, SimState, UiState,
 } from './storeTypes'
 import * as edits from './edits'
 import * as persistence from './persistence'
@@ -60,6 +59,7 @@ const INITIAL_UI: UiState = {
   toolNodes: [],
   addEdgeOptions: { twoWay: true, highway: 'residential', lanes: 1, maxspeed: 50 },
   planApercu: {},
+  itineraires: null,
   revealCounter: 0,
 }
 
@@ -186,7 +186,13 @@ function sameControllerHeader(a: SignalController, b: SignalController): boolean
     && a.plans === b.plans && a.schedule === b.schedule && a.source === b.source
 }
 
-/** Applique un correctif de contrôleur ; un changement de `nodeIds` entraîne celui des régulations de nœud. */
+/**
+ * Applique un correctif de contrôleur ; un changement de `nodeIds` entraîne celui des régulations de nœud.
+ *
+ * Un nœud n'appartient qu'à un contrôleur : celui qui le reçoit le retire des autres, et un contrôleur
+ * qui perdrait tous ses nœuds disparaît. Sans cela deux contrôleurs piloteraient les mêmes mouvements,
+ * chacun avec ses phases, et le carrefour aurait deux plans de feux simultanés.
+ */
 function applyControllerPatch(
   network: Network,
   id: ControllerId,
@@ -221,7 +227,20 @@ function applyControllerPatch(
     }
   }
   if (!changed) return network
-  return { ...network, controllers: { ...network.controllers, [id]: next }, controls }
+
+  const controllers = { ...network.controllers, [id]: next }
+  if (patch.nodeIds) {
+    const repris = new Set(next.nodeIds)
+    for (const autre of Object.values(network.controllers)) {
+      if (autre.id === id) continue
+      const restants = autre.nodeIds.filter((n) => !repris.has(n))
+      if (restants.length === autre.nodeIds.length) continue
+      // Un contrôleur sans nœud ne pilote plus rien : il disparaît avec le regroupement.
+      if (restants.length) controllers[autre.id] = { ...autre, nodeIds: restants }
+      else delete controllers[autre.id]
+    }
+  }
+  return { ...network, controllers, controls }
 }
 
 /**
@@ -254,83 +273,6 @@ function edgeBetween(edgesFrom: NetEdge[] | undefined, to: NodeId): NetEdge | un
     if (!best || e.length < best.length) best = e
   }
   return best
-}
-
-/* ---------- Rattachement manuel d'un dossier de carrefour (§14.3) ---------- */
-
-
-
-/**
- * Dossiers bruts d'un fichier déjà analysé : la liste `carrefours` (ou `dossiers`), ou le tableau lui-même.
- * Même lecture tolérante que l'importeur, mais réduite à ce qu'il faut pour retrouver un dossier par la suite.
- */
-function dossiersBruts(racine: unknown): Record<string, unknown>[] {
-  const liste = Array.isArray(racine)
-    ? racine
-    : typeof racine === 'object' && racine !== null
-      ? (racine as Record<string, unknown>).carrefours ?? (racine as Record<string, unknown>).dossiers
-      : undefined
-  if (!Array.isArray(liste)) return []
-  return liste.filter((d): d is Record<string, unknown> => typeof d === 'object' && d !== null && !Array.isArray(d))
-}
-
-/**
- * Voies telles que le dossier les écrit en entête, à afficher à l'exploitant : « Avenue de la Libération
- * (D1082), Rue de Jourcey, Rue de la Guillonnière ». Ce sont les rues qu'il reconnaîtra sur le terrain.
- *
- * Surtout pas les libellés normalisés de `voiesDuDossier` : eux sont découpés pour la comparaison, et
- * ressortiraient en bouillie (« arrivée nord », « côté parking », « CE14+M9z »). À défaut d'entête, les
- * voies des groupes, faute de mieux.
- */
-function voiesDeclarees(dossier: unknown): string[] {
-  if (typeof dossier !== 'object' || dossier === null) return []
-  const brut = dossier as Record<string, unknown>
-  const textes = (v: unknown): string[] => {
-    if (typeof v === 'string') return [v]
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-  }
-  const groupes = Array.isArray(brut.groupes) ? brut.groupes : []
-  const source = textes(brut.voies ?? brut.voies_plan).length
-    ? textes(brut.voies ?? brut.voies_plan)
-    : groupes.flatMap((g) => textes(typeof g === 'object' && g !== null ? (g as Record<string, unknown>).voie : undefined))
-  const vues = new Set<string>()
-  const out: string[] = []
-  for (const t of source) {
-    const propre = t.trim()
-    if (!propre || vues.has(propre)) continue
-    vues.add(propre)
-    out.push(propre)
-  }
-  return out
-}
-
-
-
-/**
- * Réseau où seuls les tronçons touchant `carrefour` gardent leur nom.
- *
- * C'est ce qui permet de rattacher un dossier au carrefour désigné par l'exploitant sans réécrire une
- * ligne de la conversion : l'importeur ne reconnaît un carrefour qu'aux noms de ses rues, donc un réseau
- * où lui seul est nommé ne lui laisse aucune autre cible. La géométrie, l'adjacence et les régulations
- * restent intactes : les mouvements construits au carrefour sont exactement ceux du réseau réel.
- */
-function reseauLimiteA(network: Network, carrefour: Set<NodeId>): Network {
-  const edges: Record<EdgeId, NetEdge> = {}
-  for (const [id, e] of Object.entries(network.edges)) {
-    edges[id] = carrefour.has(e.from) || carrefour.has(e.to) ? e : { ...e, name: undefined }
-  }
-  return { ...network, edges }
-}
-
-/** Nœuds que le contrôleur du carrefour couvre : un dossier remplace le contrôleur entier, pas un seul de ses nœuds. */
-function noeudsDuCarrefour(network: Network, nodeId: NodeId): Set<NodeId> {
-  const out = new Set<NodeId>([nodeId])
-  const control = network.controls[nodeId]
-  const controller = control?.type === 'signals' && control.controllerId
-    ? network.controllers[control.controllerId]
-    : undefined
-  for (const n of controller?.nodeIds ?? []) if (network.nodes[n]) out.add(n)
-  return out
 }
 
 /* ------------------------------------------------------------------ */
@@ -372,17 +314,18 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         if (project.network.controllers[id]?.plans?.some((p) => p.id === planId)) planApercu[id] = planId
       }
       if (Object.keys(planApercu).length !== Object.keys(state.ui.planApercu).length) ui = { ...ui, planApercu }
+      // Itinéraires : un nœud disparu les vide, un réseau modifié les périme. Les laisser affichés après
+      // une fermeture de rue ou un changement de vitesse ferait lire des temps qui ne valent plus, sur des
+      // tronçons qui ne sont peut-être plus praticables.
+      const apercu = state.ui.itineraires
+      if (apercu) {
+        if (!project.network.nodes[apercu.from] || !project.network.nodes[apercu.to]) {
+          ui = { ...ui, itineraires: null }
+        } else if (!apercu.perime && state.project?.network !== project.network) {
+          ui = { ...ui, itineraires: { ...apercu, perime: true, actif: -1 } }
+        }
+      }
       if (ui !== state.ui) out.ui = ui
-      // Un dossier en attente propose des carrefours : celui qui vient d'être supprimé ne doit plus figurer
-      // dans la liste, sinon le rattachement viserait un nœud absent du réseau.
-      let dossiersChanges = false
-      const dossiers = state.dossiersNonRattaches.map((d) => {
-        const candidats = d.candidats.filter((c) => project.network.nodes[c.nodeId])
-        if (candidats.length === d.candidats.length) return d
-        dossiersChanges = true
-        return { ...d, candidats }
-      })
-      if (dossiersChanges) out.dossiersNonRattaches = dossiers
       return out
     }
 
@@ -560,8 +503,7 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
       error: null,
       library: [],
       dirty: false,
-      dossiersRapport: null,
-      dossiersNonRattaches: [],
+      dossierRapport: null,
 
       /* --------- Projet --------- */
 
@@ -705,15 +647,14 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
           hover: null,
           drag: null,
           // Les plans imposés désignaient les carrefours du projet précédent : ils n'ont plus de sens ici.
-          ui: { ...s.ui, toolNodes: [], planApercu: {} },
+          ui: { ...s.ui, toolNodes: [], planApercu: {}, itineraires: null },
           sim: { ...INITIAL_SIM, speed: s.sim.speed },
           canUndo: false,
           canRedo: false,
           dirty: false,
           error: null,
           // Idem pour un import de dossiers : ses carrefours candidats appartenaient à l'autre réseau.
-          dossiersRapport: null,
-          dossiersNonRattaches: [],
+          dossierRapport: null,
         }))
         autosave(next)
       },
@@ -1032,144 +973,82 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         return { controllers: stops.length, path }
       },
 
-      importDossiersFeux(text: string): DossierImportReport {
+      /* ---------------- Itinéraires ---------------- */
+
+      calculerItineraires(fromNode: NodeId, toNode: NodeId): void {
         const project = get().project
-        if (!project) return { matches: 0, nonRattaches: 0, avertissements: ['Aucun projet chargé.'] }
-        // Le fichier est lu ici pour retrouver le contenu brut de chaque dossier, que le bilan de l'import
-        // ne rend pas : un dossier laissé de côté doit rester rattachable à la main plus tard, et cela
-        // suppose de pouvoir le repasser à l'importeur tel quel. Le module d'import accepte aussi bien le
-        // texte que la valeur déjà analysée, et ne lève jamais : un fichier illisible ressort en
-        // avertissements (§14).
-        let racine: unknown = text
-        try {
-          racine = JSON.parse(text)
-        } catch {
-          // Fichier illisible : l'importeur le dira mieux, avec le vocabulaire de l'exploitant.
-        }
-        const resultat = lireDossiersFeux(racine, { network: project.network })
-        const bruts = dossiersBruts(racine)
-        const rattaches = resultat.matches.filter((m) => m.nodeId !== null && m.controllerId !== null)
-        const avertissements = [...resultat.avertissements]
-        const enAttente: DossierNonRattache[] = []
-        resultat.matches.forEach((m, i) => {
-          const prefixe = `${m.nom} (${m.dossierId})`
-          if (m.nodeId === null) {
-            avertissements.push(`${prefixe} : non rattaché — ${m.raison}.`)
-            // L'importeur produit exactement un bilan par dossier lu, dans l'ordre du fichier ; le
-            // rapprochement par identifiant reste prioritaire, l'ordre n'étant pas un contrat.
-            const brut = bruts.find((d) => typeof d.id === 'string' && d.id.trim() === m.dossierId) ?? bruts[i]
-            if (brut) {
-              enAttente.push({
-                dossierId: m.dossierId,
-                nom: m.nom,
-                voies: voiesDeclarees(brut),
-                raison: m.raison,
-                candidats: candidatsPourDossier(project.network, brut),
-                brut,
-              })
-            }
-          } else if (m.confiance !== 'sure') {
-            avertissements.push(`${prefixe} : rattachement à confirmer — ${m.raison}.`)
-          }
-          for (const a of m.avertissements) avertissements.push(`${prefixe} : ${a}`)
+        if (!project?.network.nodes[fromNode] || !project.network.nodes[toNode]) return
+        const chemins = itinerairesLesPlusCourts(project.network, fromNode, toNode, {
+          count: NB_ITINERAIRES,
+          settings: project.settings,
         })
-        const bilan: DossierImportReport = {
-          matches: rattaches.length,
-          nonRattaches: resultat.matches.length - rattaches.length,
-          avertissements,
-        }
-        set({ dossiersRapport: bilan, dossiersNonRattaches: enAttente })
-        if (!rattaches.length) return bilan
-        const n = rattaches.length
-        editNetwork(
-          `Import de ${n} dossier${n > 1 ? 's' : ''} de carrefour`,
-          (network) => ({
-            ...network,
-            // Un dossier remplace intégralement le contrôleur du carrefour qu'il décrit ; les autres carrefours
-            // ne sont pas touchés, un fichier partiel ne défait donc pas le reste du projet.
-            controllers: { ...network.controllers, ...resultat.controllers },
-            controls: { ...network.controls, ...resultat.controls },
-          }),
-          'signals',
-        )
-        return bilan
+        set((s) => ({
+          ui: { ...s.ui, itineraires: { from: fromNode, to: toNode, chemins, perime: false, actif: -1 } },
+          error: chemins.length
+            ? s.error
+            : 'Aucun itinéraire ne relie ces deux nœuds : sens uniques, interdictions de tourner ou tronçons fermés les séparent.',
+        }))
       },
 
-      rattacherDossier(dossierId: string, nodeId: NodeId): void {
+      recalculerItineraires(): void {
+        const apercu = get().ui.itineraires
+        if (apercu) get().calculerItineraires(apercu.from, apercu.to)
+      },
+
+      effacerItineraires(): void {
+        set((s) => (s.ui.itineraires ? { ui: { ...s.ui, itineraires: null } } : {}))
+      },
+
+      setItineraireActif(rang: number): void {
+        set((s) => {
+          const apercu = s.ui.itineraires
+          if (!apercu) return {}
+          const actif = rang >= 0 && rang < apercu.chemins.length ? rang : -1
+          if (actif === apercu.actif) return {}
+          return { ui: { ...s.ui, itineraires: { ...apercu, actif } } }
+        })
+      },
+
+      importDossierFeux(controllerId: ControllerId, contenu: string): DossierImportReport {
         const project = get().project
-        const dossier = get().dossiersNonRattaches.find((d) => d.dossierId === dossierId)
-        if (!project || !dossier) return
-        const noeud = project.network.nodes[nodeId]
-        if (!noeud) {
-          set({ error: `Ce carrefour n’existe plus dans le réseau : le dossier ${dossierId} n’a pas été rattaché.` })
-          return
-        }
-        // Le dossier est repassé à l'importeur, seul, sur un réseau où seul le carrefour choisi est nommé :
-        // la conversion (groupes, phases, plans, calendrier, inter-verts) reste celle de l'import
-        // automatique, à ceci près que le carrefour est imposé au lieu d'être deviné.
-        //
-        // Le contrat à vérifier n'est pas « l'importeur a visé ce nœud » mais « ce nœud est bien passé sous
-        // le contrôleur du dossier » : un carrefour regroupé (plusieurs nœuds à feux sous un même
-        // contrôleur) est rattaché par n'importe lequel de ses nœuds, et tous en héritent.
-        const essayer = (noms: Set<NodeId>): DossierImportResult => lireDossiersFeux(
-          { carrefours: [dossier.brut] },
-          { network: reseauLimiteA(project.network, noms) },
+        const bilanVide = (avertissements: string[]): DossierImportReport => (
+          { controllerId, applique: false, dossierId: '', groupes: 0, avertissements }
         )
-        /** Contrôleur sous lequel le nœud choisi est passé, `null` si le rattachement n'a pas abouti. */
-        const rattachement = (r: DossierImportResult): ControllerId | null => {
-          const id = r.matches[0]?.controllerId
-          return id && r.controls[nodeId]?.controllerId === id ? id : null
+        if (!project) return bilanVide(['Aucun projet chargé.'])
+        // L'exploitant a désigné le carrefour : l'importeur n'a plus à le reconnaître, seulement à
+        // rattacher les groupes du dossier aux mouvements de ce carrefour-là. Il ne lève jamais : un
+        // fichier illisible ressort en avertissements (§14).
+        const resultat = lireDossierFeux(contenu, { network: project.network, controllerId })
+        const avertissements = [...resultat.avertissements]
+        if (resultat.groupesNonRattaches.length) {
+          const groupes = resultat.groupesNonRattaches.join(', ')
+          avertissements.push(`Groupe(s) ${groupes} : aucun mouvement de ce carrefour ne leur correspond ; ils ne commandent rien. Vérifiez que le dossier est bien celui de ce carrefour.`)
         }
-        // Premier essai : tout le carrefour regroupé reste nommé, pour que les groupes du dossier
-        // retrouvent les approches de chacun de ses nœuds.
-        let resultat = essayer(noeudsDuCarrefour(project.network, nodeId))
-        let controllerId = rattachement(resultat)
-        if (!controllerId) {
-          // Second essai : deux nœuds d'un même carrefour regroupé peuvent se valoir, et l'importeur refuse
-          // alors de trancher entre eux comme il l'a fait à l'import. Ne garder que le nœud désigné lève
-          // l'égalité ; les groupes de l'autre moitié resteront peut-être sans mouvement, mais un
-          // rattachement partiel vaut mieux qu'un refus que l'exploitant ne peut pas contourner.
-          resultat = essayer(new Set([nodeId]))
-          controllerId = rattachement(resultat)
+        const controller = resultat.controller
+        if (!controller) {
+          const bilan = bilanVide(avertissements)
+          set({ dossierRapport: { ...bilan, dossierId: resultat.dossierId } })
+          return get().dossierRapport as DossierImportReport
         }
-        const m = resultat.matches[0]
-        const nom = noeud.label || nodeId
-        if (!controllerId) {
-          set({ error: `Le dossier ${dossierId} ne décrit rien qui s’applique à ${nom} : ${m?.raison ?? 'dossier illisible'}.` })
-          return
-        }
+        // Le dossier remplace le plan du contrôleur en place : même identifiant, mêmes nœuds, donc aucune
+        // régulation à changer. Les autres carrefours ne sont pas touchés.
         const applique = editNetwork(
-          `Dossier ${dossierId} rattaché au carrefour ${nom}`,
-          (network) => ({
-            ...network,
-            controllers: { ...network.controllers, ...resultat.controllers },
-            controls: { ...network.controls, ...resultat.controls },
-          }),
+          `Dossier ${resultat.dossierId} appliqué à ${controller.name}`,
+          (network) => ({ ...network, controllers: { ...network.controllers, [controller.id]: controller } }),
           'signals',
         )
         if (!applique) {
-          set({ error: `Le dossier ${dossierId} décrit déjà exactement le plan en place à ${nom} : rien n’a changé.` })
-          return
+          avertissements.push('Le dossier décrit exactement le plan déjà en place : rien n’a changé.')
         }
-        // Le dossier est traité : il quitte la liste d'attente, ses réserves de lecture rejoignent le bilan
-        // de l'import, et son carrefour devient la sélection pour être relu tout de suite.
-        set((s) => ({
-          dossiersNonRattaches: s.dossiersNonRattaches.filter((d) => d.dossierId !== dossierId),
-          dossiersRapport: s.dossiersRapport
-            ? {
-                matches: s.dossiersRapport.matches + 1,
-                nonRattaches: Math.max(0, s.dossiersRapport.nonRattaches - 1),
-                avertissements: [
-                  ...s.dossiersRapport.avertissements,
-                  `${dossier.nom} (${dossierId}) : rattaché à la main au carrefour ${nom}.`,
-                  ...m.avertissements.map((a) => `${dossier.nom} (${dossierId}) : ${a}`),
-                ],
-              }
-            : null,
-        }))
-        // `m.controllerId` est renseigné dès que le rattachement a abouti ; le test lève l'ambiguïté de type.
-        if (m.controllerId) get().select({ kind: 'controller', id: m.controllerId }, { reveal: true })
-        else get().select({ kind: 'node', id: nodeId }, { reveal: true })
+        const bilan: DossierImportReport = {
+          controllerId,
+          applique: true,
+          dossierId: resultat.dossierId,
+          groupes: resultat.groupesRattaches,
+          avertissements,
+        }
+        set({ dossierRapport: bilan })
+        return bilan
       },
 
       setActivePlan(controllerId, planId): void {
@@ -1420,6 +1299,7 @@ export function createAppStore(opts: AppStoreOptions = {}): UseBoundStore<StoreA
         const [from, to] = toolNodes
         set((s) => ({ ui: { ...s.ui, toolNodes: [] } }))
         if (state.ui.tool === 'greenwave') state.applyGreenWave(from, to)
+        else if (state.ui.tool === 'itineraires') state.calculerItineraires(from, to)
         else state.addEdge(from, to, state.ui.addEdgeOptions)
       },
 

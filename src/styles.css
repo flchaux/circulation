@@ -532,9 +532,10 @@ input[type='checkbox'] {
 }
 
 /*
- * Variante en grille : quatre outils ne tiennent pas sur une ligne de 356 px sans que « Ajouter un
+ * Variante en grille : cinq outils ne tiennent pas sur une ligne de 356 px sans que « Ajouter un
  * tronçon » ne soit rogné (les libellés ne se coupent pas, `overflow: hidden` masquerait le dernier).
- * Deux lignes de deux gardent les libellés entiers et la même apparence de groupe.
+ * Deux lignes de deux, puis un outil sur toute la largeur, gardent les libellés entiers et la même
+ * apparence de groupe.
  */
 .segmented--grille {
   display: grid;
@@ -550,8 +551,14 @@ input[type='checkbox'] {
   border-right: 0;
 }
 
-.segmented--grille button:nth-last-child(-n + 2) {
+.segmented--grille button:last-child {
   border-bottom: 0;
+}
+
+/* Outil seul sur sa ligne (nombre impair d'outils) : il occupe les deux colonnes. */
+.segmented--grille button.pleine-largeur {
+  grid-column: 1 / -1;
+  border-right: 0;
 }
 
 .badge {
@@ -605,6 +612,10 @@ input[type='checkbox'] {
 .hint.error,
 .error {
   color: var(--danger);
+}
+
+.hint.attention {
+  color: var(--avertissement);
 }
 
 .muted {
@@ -672,6 +683,64 @@ input[type='checkbox'] {
 
 .advanced > *:not(summary) {
   margin-top: 8px;
+}
+
+/* Recherche rapide au-dessus d'une liste ou d'un tableau. */
+.recherche {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 1px solid var(--bordure);
+  border-radius: var(--rayon);
+  background: #fff;
+}
+
+.recherche:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-doux);
+}
+
+.recherche-icone {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  color: var(--texte-doux);
+}
+
+.recherche-champ {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.recherche-champ:focus {
+  outline: none;
+}
+
+/* La croix native de `type="search"` varie d'un navigateur à l'autre : on fournit la nôtre. */
+.recherche-champ::-webkit-search-cancel-button {
+  display: none;
+}
+
+.recherche-vider {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--texte-doux);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.recherche-vider:hover {
+  color: var(--texte);
 }
 
 /* ------------------------------------------------------------------ */
@@ -861,6 +930,29 @@ input[type='checkbox'] {
 .data-table tbody tr:last-child th,
 .data-table tbody tr:last-child td {
   border-bottom: 0;
+}
+
+/*
+ * Itinéraires comparés : la pastille reprend exactement la couleur du ruban dessiné sur la carte
+ * (`itineraireColor`), seul lien entre la ligne du tableau et le tracé qu'elle décrit. La ligne survolée
+ * est celle que la carte met en avant, d'où la même mise en valeur que pour une ligne sélectionnée.
+ */
+.pastille-itineraire {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.data-table.itineraires th[scope='row'] {
+  min-width: 0;
+}
+
+.data-table.itineraires tbody tr.active {
+  background: #dbe9fa;
 }
 
 .sort-mark {
@@ -1174,48 +1266,6 @@ input[type='checkbox'] {
   white-space: nowrap;
 }
 
-/*
- * Dossier laissé de côté par l'import, en attente d'un rattachement à la main.
- *
- * Chaque dossier est encadré comme une fiche : plusieurs peuvent s'enchaîner dans le même bloc, et les
- * voies de l'un ne doivent pas se lire comme les carrefours proposés pour le suivant. Le liseré reprend
- * la couleur des avertissements : c'est bien une réserve de l'import, pas un réglage ordinaire.
- */
-.dossier-attente {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--bordure);
-  border-left: 3px solid var(--avertissement);
-  border-radius: var(--rayon);
-  background: var(--surface-2);
-}
-
-/*
- * Un dossier dont les voies suivent une avenue entière peut proposer vingt-cinq carrefours : la liste
- * défile plutôt que de repousser le bouton de rattachement hors de la barre latérale.
- */
-.dossier-attente > .list {
-  max-height: 190px;
-  overflow-y: auto;
-}
-
-/*
- * Le nom d'un carrefour candidat se lit en entier, sur deux lignes s'il le faut. Ailleurs, tronquer une
- * ligne de liste est sans conséquence ; ici les noms de rues sont le seul moyen de distinguer deux
- * carrefours voisins, et « Avenue de la Libération / Rue de… » ne distingue plus rien.
- */
-.dossier-attente .list-main {
-  overflow: visible;
-  white-space: normal;
-  text-overflow: clip;
-}
-
-.dossier-nom {
-  font-weight: 600;
-}
-
 /* Matrice d'inter-verts : lecture seule, une case vide signale deux groupes compatibles. */
 .data-table.intervert th,
 .data-table.intervert td {
@@ -1514,12 +1564,3 @@ input[type='checkbox'] {
   background: rgba(0, 0, 0, 0.06);
 }
 
-/* Rues qui motivent un carrefour candidat, sous son libellé. */
-.candidat-rues {
-  display: block;
-  margin-top: 2px;
-  color: var(--texte-doux);
-  font-size: 11px;
-  font-weight: 400;
-  white-space: normal;
-}

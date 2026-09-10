@@ -363,6 +363,7 @@ function scene(network: Network): MapScene {
     showLabels: false,
     showVehicles: false,
     tool: 'addNode',
+    itineraires: null,
     toolNodes: [],
     toolPath: [],
     frame: null,
